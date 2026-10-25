@@ -17,6 +17,7 @@ import bmesh
 import bpy
 import numpy as np
 from mathutils import Matrix, Vector, kdtree, noise
+from mathutils.bvhtree import BVHTree
 
 ROOT = Path(__file__).resolve().parent.parent
 BLEND_PATH = ROOT / "build" / "cat_scooter.blend"
@@ -507,8 +508,7 @@ def build_materials():
         "nose": make_material("CatNose", (0.10, 0.04, 0.05), 0.4),
         "inner_ear": make_material("InnerEar", (0.12, 0.05, 0.06), 0.6),
         "whisker": make_material("Whisker", (0.75, 0.75, 0.72), 0.4),
-        "collar": make_material("Collar", (0.7, 0.03, 0.05), 0.5),
-        "gold": make_material("Bell", (1.0, 0.75, 0.3), 0.2, metallic=1.0),
+        "kerchief": kerchief_material(),
         "bump_yellow": make_material("BumpYellow", (0.9, 0.65, 0.02), 0.6),
         "spring": make_material("Spring", (0.12, 0.12, 0.13), 0.3, metallic=1.0),
         "strands": strand_material(),
@@ -687,6 +687,26 @@ def grass_blade_material():
     nt.links.new(bsdf.outputs['BSDF'], mix.inputs[1])
     nt.links.new(translucent.outputs['BSDF'], mix.inputs[2])
     nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
+    return mat
+
+
+def kerchief_material():
+    """Red cotton: a fine plain weave as bump, with sheen at grazing angles."""
+    mat = make_material("Kerchief", (0.28, 0.008, 0.012), 0.9,
+                        inputs={"Sheen Weight": 0.8, "Sheen Roughness": 0.35, "Sheen Tint": (1.0, 0.5, 0.5, 1.0)})
+    nt = mat.node_tree
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    weave = []
+    for axis in ('X', 'Y'):
+        threads = nt.nodes.new('ShaderNodeTexWave')
+        threads.bands_direction = axis
+        threads.inputs['Scale'].default_value = 900.0  # about 1 mm per thread pair
+        nt.links.new(coord.outputs['Object'], threads.inputs['Vector'])
+        weave.append(threads.outputs['Fac'])
+    bump = nt.nodes.new('ShaderNodeBump')
+    bump.inputs['Strength'].default_value = 0.15
+    nt.links.new(math_node(nt, 'MULTIPLY', weave[0], weave[1]), bump.inputs['Height'])
+    nt.links.new(bump.outputs['Normal'], principled_node(mat).inputs['Normal'])
     return mat
 
 
@@ -1614,6 +1634,91 @@ def front_leg(b, s, mat):
     toes(b, BAR_DESIGN.x + 0.009, s, 0.135, BAR_DESIGN.z + 0.009, 0.0085, mat)
 
 
+KERCHIEF_LIFT = 0.004  # cloth above the skin; the fur under the cloth is removed
+KERCHIEF_BAND = 0.022  # width of the band round the neck
+KERCHIEF_DROP = 0.085  # how far the triangle hangs below the band at the front
+
+
+def build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top):
+    """A red handkerchief tied round the neck: a band, a triangle hanging over the chest, and a
+    knot with two short ends at the back. Each column of the cloth starts on the band's top edge
+    at an angle round the neck and runs down over the body, found by casting rays out from the
+    neck axis; smoothing then lets the cloth bridge the hollow between neck and chest.
+    Returns the cloth vertices in the body's frame."""
+    bvh = BVHTree.FromObject(body, bpy.context.evaluated_depsgraph_get())
+    axis = (neck_top - neck_base).normalized()
+    front = (Vector((1, 0, 0)) - axis * axis.x).normalized()
+    side = axis.cross(front)
+    top = neck_base + axis * 0.035 - CAT_PIVOT  # centre of the band's top edge, body frame
+
+    def length(phi):
+        """Cloth length down from the band's top edge, at angle phi from the front."""
+        triangle = KERCHIEF_DROP * max(0.0, 1.0 - abs(phi) / 1.1)
+        from_back = math.pi - abs(phi)
+        ends = 0.045 * max(0.0, 1.0 - abs(from_back - 0.16) / 0.11)
+        return KERCHIEF_BAND + triangle + ends
+
+    def onto_body(p):
+        """Push p out to KERCHIEF_LIFT above the body surface if it is closer or inside."""
+        location, normal, _, _ = bvh.find_nearest(p)
+        lift = (p - location).dot(normal)
+        return p if lift >= KERCHIEF_LIFT else location + normal * KERCHIEF_LIFT
+
+    columns, rows = 120, 16
+    grid = []
+    for j in range(columns):
+        phi = 2 * math.pi * j / columns - math.pi
+        out = front * math.cos(phi) + side * math.sin(phi)
+        column = []
+        for i in range(rows):
+            origin = top - axis * (length(phi) * i / (rows - 1))
+            location, normal, _, _ = bvh.ray_cast(origin, out, 0.2)
+            column.append(location + normal * KERCHIEF_LIFT if location else origin + out * 0.06)
+        grid.append(column)
+    for _ in range(8):
+        smoothed = []
+        for j in range(columns):
+            left, right = grid[j - 1], grid[(j + 1) % columns]
+            column = []
+            for i in range(rows):
+                p = grid[j][i] * 0.5 + (left[i] + right[i]) * 0.25
+                if 0 < i < rows - 1:  # the edges keep their line round the neck
+                    p = p * 0.5 + (grid[j][i - 1] + grid[j][i + 1]) * 0.25
+                column.append(onto_body(p))
+            smoothed.append(column)
+        grid = smoothed
+    # Soft folds in the hanging triangle.
+    for j, column in enumerate(grid):
+        phi = 2 * math.pi * j / columns - math.pi
+        hang = max(0.0, 1.0 - abs(phi) / 1.1)
+        for i, p in enumerate(column):
+            normal = bvh.find_nearest(p)[1]
+            column[i] = p + normal * 0.004 * hang * (i / (rows - 1)) * math.sin(9 * phi)
+
+    bm = bmesh.new()
+    verts = [[bm.verts.new(p) for p in column] for column in grid]
+    for j in range(columns):
+        for i in range(rows - 1):
+            a, b = verts[j], verts[(j + 1) % columns]
+            bm.faces.new((a[i], b[i], b[i + 1], a[i + 1]))
+    back = top - axis * KERCHIEF_BAND * 0.5
+    location, normal, _, _ = bvh.ray_cast(back, -front, 0.2)
+    knot = Matrix.Translation(location + normal * (KERCHIEF_LIFT + 0.004)) @ S(0.006, 0.009, 0.007)
+    bmesh.ops.create_uvsphere(bm, u_segments=12, v_segments=8, radius=1.0, matrix=knot)
+    for face in bm.faces:
+        face.smooth = True
+    mesh = bpy.data.meshes.new("Kerchief")
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.materials.append(mats["kerchief"])
+    cloth = link(bpy.data.objects.new("Kerchief", mesh), coll, cat_rig)
+    skin(cloth, cat_rig, smoothing=10)
+    solid = cloth.modifiers.new("Thickness", 'SOLIDIFY')
+    solid.thickness = 0.0012
+    solid.offset = 0.0
+    return [v.co.copy() for v in mesh.vertices]
+
+
 def build_cat(mats, coll, scooter_body):
     cat_rig = build_cat_armature(coll, scooter_body)
     FUR = 0
@@ -1621,21 +1726,26 @@ def build_cat(mats, coll, scooter_body):
     b = MeshBuilder(CAT_PIVOT)
     b.ellipsoid((-0.005, 0, 0.34), (0.085, 0.08, 0.16), FUR, rot=R(math.radians(34), 'Y'))
     b.ellipsoid((0.055, 0, 0.44), (0.075, 0.072, 0.08), FUR)
+    # Neck from the chest up into the back of the skull; its top end stays inside the head
+    # when the head turns about NECK.
+    neck_base, neck_top = Vector((0.06, 0, 0.47)), Vector((0.105, 0, 0.58))
+    b.limb(neck_base, neck_top, 0.06, 0.05, FUR)
     for s in (-1, 1):
         hind_leg(b, s, FUR)
         front_leg(b, s, FUR)
     body = b.to_object("CatBody", [mats["fur"]], coll, cat_rig)
     remesh(body, 0.0035, 8)
+    cloth = build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top)
+    # No fur under the cloth.
+    tree = kdtree.KDTree(len(cloth))
+    for k, co in enumerate(cloth):
+        tree.insert(co, k)
+    tree.balance()
+    bare = body.vertex_groups.new(name="FurDensity")
+    for v in body.data.vertices:
+        bare.add([v.index], smoothstep(0.0045, 0.0065, tree.find(v.co)[2]), 'REPLACE')
     skin(body, cat_rig)
-    add_fur(body, mats, 5000, 0.012, (-1.0, 0.0, -0.6))
-
-    c = MeshBuilder(CAT_PIVOT)
-    neck_dir = Vector((0.055, 0, 0.16)).normalized()
-    collar_c = Vector((0.085, 0, 0.515))
-    c.torus(Matrix.Translation(collar_c) @ align_z(neck_dir), 0.054, 0.01, 0, seg_minor=8)
-    front = (Vector((1, 0, 0)) - neck_dir * neck_dir.x).normalized()
-    c.ellipsoid(collar_c + front * 0.068 - neck_dir * 0.012, (0.012,) * 3, 1, segments=16, rings=8)
-    parent_to_bone(c.to_object("CatCollar", [mats["collar"], mats["gold"]], coll, cat_rig), cat_rig, "neck")
+    add_fur(body, mats, 5000, 0.012, (-1.0, 0.0, -0.6), density_group=bare.name)
 
     tail_curve = build_tail(mats, coll, cat_rig)
     head_rig, ears, eyes, whiskers = build_head(mats, coll, cat_rig)
