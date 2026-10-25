@@ -1378,6 +1378,14 @@ def toes(b, front, side, y, z, radius, mat):
         b.ellipsoid((front + reach, side * (y + dy), z), (radius * 1.1, radius, radius * 0.85), mat, segments=12, rings=6)
 
 
+class Cat:
+    """Animated parts of the cat. Ears, eyes and whiskers are ordered (right, left)."""
+
+    def __init__(self, rig, head, tail, ears, eyes, whiskers):
+        self.rig, self.head, self.tail = rig, head, tail
+        self.ears, self.eyes, self.whiskers = ears, eyes, whiskers
+
+
 def hind_joints(s):
     return {"hip": Vector((-0.075, s * 0.052, 0.225)), "knee": Vector((0.012, s * 0.066, 0.168)),
             "hock": Vector((-0.088, s * 0.056, 0.13)), "ball": Vector((-0.012, s * 0.052, 0.128))}
@@ -1420,6 +1428,8 @@ def build_cat_armature(coll, scooter_body):
         if parent:
             data.edit_bones[name].parent = data.edit_bones[parent]
             data.edit_bones[name].use_connect = connected
+            if parent == "spine":
+                data.edit_bones[name].inherit_scale = 'NONE'  # breathing scales the chest only
     bpy.ops.object.mode_set(mode='OBJECT')
     for chain, joints, end in (("shin", hind_joints, "hock"), ("forearm", front_joints, "wrist")):
         for s, side in ((1, "L"), (-1, "R")):
@@ -1522,8 +1532,8 @@ def build_cat(mats, coll, scooter_body):
     parent_to_bone(c.to_object("CatCollar", [mats["collar"], mats["gold"]], coll, cat_rig), cat_rig, "neck")
 
     tail_curve = build_tail(mats, coll, cat_rig)
-    head_rig, ears, eyes = build_head(mats, coll, cat_rig)
-    return cat_rig, head_rig, tail_curve, ears, eyes
+    head_rig, ears, eyes, whiskers = build_head(mats, coll, cat_rig)
+    return Cat(cat_rig, head_rig, tail_curve, ears, eyes, whiskers)
 
 
 TAIL_REST = [(0, 0, 0), (-0.09, 0, 0.02), (-0.16, 0, 0.09), (-0.19, 0, 0.19), (-0.17, 0, 0.27), (-0.12, 0, 0.30)]
@@ -1601,11 +1611,17 @@ def build_head(mats, coll, cat_rig):
     add_fur(head, mats, 2500, 0.0072, (-1.2, 0.0, 0.0), density_group=group.name)
 
     f = MeshBuilder(NECK)
-    for s in (-1, 1):
-        for end in ((0.205, 0.115, 0.598), (0.207, 0.118, 0.583), (0.2, 0.11, 0.568)):
-            f.rod((0.183, s * 0.028, 0.585), (end[0], s * end[1], end[2]), 0.0012, 1, segments=4)
     f.ellipsoid((0.193, 0, 0.596), (0.007, 0.011, 0.007), 0)
-    f.to_object("CatFace", [mats["nose"], mats["whisker"]], coll, head_rig)
+    f.to_object("CatFace", [mats["nose"]], coll, head_rig)
+
+    whiskers = []
+    for s in (-1, 1):
+        root = Vector((0.183, s * 0.028, 0.585))
+        w = MeshBuilder(root)
+        for end in ((0.205, 0.115, 0.598), (0.207, 0.118, 0.583), (0.2, 0.11, 0.568)):
+            w.rod(root, (end[0], s * end[1], end[2]), 0.0012, 0, segments=4)
+        whiskers.append(w.to_object("WhiskersL" if s > 0 else "WhiskersR", [mats["whisker"]], coll, head_rig,
+                                    root - NECK))
 
     ears = []
     for s in (-1, 1):
@@ -1624,7 +1640,7 @@ def build_head(mats, coll, cat_rig):
         e.ellipsoid(c, (0.0175,) * 3, 0)
         e.ellipsoid(c + Vector((0.0158, 0, 0)), (0.003, 0.0045, 0.0135), 1, segments=16, rings=8)
         eyes.append(e.to_object("EyeL" if s > 0 else "EyeR", [mats["eye"], mats["pupil"]], coll, head_rig, c - NECK))
-    return head_rig, ears, eyes
+    return head_rig, ears, eyes, whiskers
 
 
 # --------------------------------------------------------------------------- animation
@@ -1650,7 +1666,8 @@ def heading(tangent):
 
 class Suspension:
     """Heave and pitch of the scooter body on one spring per axle (unit mass), driven by the
-    road height under each wheel. The cat rides on the body as a second spring."""
+    road height under each wheel. The cat rides on the body as a second spring (its legs), and
+    its head on the cat as a third (the neck), so the head nods a moment after each bump."""
 
     AXLES = (FRONT_AXLE.x, REAR_AXLE.x)
 
@@ -1662,6 +1679,9 @@ class Suspension:
         self.cat_k = (2 * math.pi * 2.5) ** 2
         self.cat_c = 2 * 0.3 * 2 * math.pi * 2.5
         self.cat = self.cat_v = 0.0
+        self.head_k = (2 * math.pi * 3.5) ** 2
+        self.head_c = 2 * 0.25 * 2 * math.pi * 3.5
+        self.head = self.head_v = 0.0
 
     def step(self, u, u_v, dt):
         forces = [self.k * (ui - (self.heave + self.slope * x)) + self.c * (vi - (self.heave_v + self.slope_v * x))
@@ -1671,8 +1691,11 @@ class Suspension:
         self.slope_v += sum(f * x for f, x in zip(forces, self.AXLES)) / self.inertia * dt
         self.heave += self.heave_v * dt
         self.slope += self.slope_v * dt
-        self.cat_v += (-self.cat_k * self.cat - self.cat_c * self.cat_v - accel) * dt
+        cat_accel = -self.cat_k * self.cat - self.cat_c * self.cat_v - accel
+        self.cat_v += cat_accel * dt
         self.cat += self.cat_v * dt
+        self.head_v += (-self.head_k * self.head - self.head_c * self.head_v - (accel + cat_accel)) * dt
+        self.head += self.head_v * dt
 
     def advance(self, road, s, ds, v):
         dt = ds / v / SUBSTEPS
@@ -1705,23 +1728,35 @@ def pose_suspension(scooter, susp, road, s, frame):
             spring.keyframe_insert(path, frame=frame)
 
 
-def pose_cat(rig, lean, drop, frame):
+def pose_cat(rig, lean, drop, breath, frame):
     """Lower the pelvis by drop and lean the spine forward by lean (radians) about its base, both
-    in the armature frame, and key the bones' local channels."""
+    in the armature frame; widen the chest by the fraction breath. Keys the bones' channels."""
     pelvis, spine = rig.pose.bones["pelvis"], rig.pose.bones["spine"]
     rest = pelvis.bone.matrix_local
     pelvis.matrix_basis = rest.inverted() @ T(0, 0, drop) @ rest
-    # The spine's parent moves by the same translation, so its basis is just the rotation.
+    # The spine's parent moves by the same translation, so its basis is the rotation, then the
+    # breathing scale across the bone (its local X and Z); its children do not inherit scale.
     rest, hinge = spine.bone.matrix_local, spine.bone.head_local
-    spine.matrix_basis = rest.inverted() @ T(*hinge) @ R(lean, 'Y') @ T(*-hinge) @ rest
+    spine.matrix_basis = rest.inverted() @ T(*hinge) @ R(lean, 'Y') @ T(*-hinge) @ rest @ S(1 + breath, 1, 1 + breath)
     for bone in (pelvis, spine):
-        bone.keyframe_insert("location", frame=frame)
-        bone.keyframe_insert("rotation_quaternion", frame=frame)
+        for path in ("location", "rotation_quaternion", "scale"):
+            bone.keyframe_insert(path, frame=frame)
 
 
-def animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes):
+EAR_TWITCHES = {0: [150], 1: [60, 205]}  # ear index (right, left) -> start frames
+
+
+def twitch(frame, starts):
+    """Ear twitch envelope: up to 1 three frames after each start, back to 0 after seven."""
+    return max((max(0.0, 1.0 - abs(frame - start - 3) / 4.0) for start in starts), default=0.0)
+
+
+def animate(scene, road, scooter, cam, cat):
     bpy.context.preferences.edit.keyframe_new_interpolation_type = 'LINEAR'
     rig, wheels = scooter.rig, scooter.wheels
+    head_rig, tail = cat.head, cat.tail
+    ear_rest = [ear.rotation_euler.copy() for ear in cat.ears]
+    breath_phase = 0.0
     s = road.arc_length_at_x(RIDE_START_X)
     v = BASE_SPEED
     lean = 0.0
@@ -1770,12 +1805,27 @@ def animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes):
         body_lean += (min(max(1.2 * pitch, -0.12), 0.35) - body_lean) * 0.08
         drop = (0.003 * math.sin(2 * math.pi * 1.6 * t) + min(max(susp.cat * 0.5, -0.025), 0.02)
                 - 0.04 * max(pitch, 0.0))
-        pose_cat(cat_rig, body_lean, drop, frame)
+        # Breathing: about 0.45 Hz on the flat, up to twice that on the climb.
+        breath_phase += 2 * math.pi * (0.45 + 0.45 * min(max(pitch, 0.0) / 0.25, 1.0)) / FPS
+        pose_cat(cat.rig, body_lean, drop, 0.015 * math.sin(breath_phase), frame)
         # Cats keep their head level: counter the scooter's lean and the body's lean, and look
-        # into the turn.
-        head_rig.rotation_euler = (lean * 0.6, 0.05 * math.sin(2 * math.pi * 0.5 * t) - body_lean * 0.7,
+        # into the turn. The neck spring adds a nod that lags each bump.
+        nod = min(max(susp.head * 15.0, -0.2), 0.2)
+        head_rig.rotation_euler = (lean * 0.6, 0.05 * math.sin(2 * math.pi * 0.5 * t) - body_lean * 0.7 + nod,
                                    min(max(kappa * 1.5, -0.25), 0.25))
         head_rig.keyframe_insert("rotation_euler", frame=frame)
+
+        # Ears fold back with speed and flutter in the wind; whiskers sweep back and flutter.
+        wind = v / BASE_SPEED
+        for k, (ear, rest, sign) in enumerate(zip(cat.ears, ear_rest, (-1, 1))):
+            flick = 0.45 * twitch(frame, EAR_TWITCHES[k])
+            flutter = 0.03 * wind * math.sin(2 * math.pi * 6.0 * t + 1.7 * k) + 0.015 * wind * math.sin(2 * math.pi * 9.3 * t)
+            ear.rotation_euler = (rest.x - sign * (flick + flutter), rest.y - 0.15 * wind - 0.3 * flick, rest.z)
+            ear.keyframe_insert("rotation_euler", frame=frame)
+        for k, (whisker, sign) in enumerate(zip(cat.whiskers, (-1, 1))):
+            sweep = 0.3 * wind + 0.05 * wind * math.sin(2 * math.pi * 8.0 * t + 2.3 * k)
+            whisker.rotation_euler = (0.03 * wind * math.sin(2 * math.pi * 11.0 * t + k), 0.0, sign * sweep)
+            whisker.keyframe_insert("rotation_euler", frame=frame)
 
         for i, point in enumerate(tail.data.splines[0].points):
             frac = i / (len(TAIL_REST) - 1)
@@ -1797,14 +1847,7 @@ def animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes):
         travelled += v / FPS
         s += v / FPS
 
-    for ear, sign, start in ((ears[1], 1, 60), (ears[0], -1, 150), (ears[1], 1, 205)):
-        rest = ear.rotation_euler.copy()
-        for f, extra in ((start, 0.0), (start + 3, 0.45), (start + 7, 0.0)):
-            ear.rotation_euler = (rest.x - sign * extra, rest.y - extra * 0.3, rest.z)
-            ear.keyframe_insert("rotation_euler", frame=f)
-        ear.rotation_euler = rest
-
-    for eye in eyes:
+    for eye in cat.eyes:
         for f, sz in ((1, 1.0), (88, 1.0), (90, 0.1), (93, 1.0), (176, 1.0), (178, 0.1), (181, 1.0)):
             eye.scale = (1.0, 1.0, sz)
             eye.keyframe_insert("scale", frame=f)
@@ -1872,7 +1915,7 @@ def main():
     road.bumps = [start + d for d in BUMPS]
 
     scooter = build_scooter(mats, actors)
-    cat_rig, head_rig, tail, ears, eyes = build_cat(mats, actors, scooter.body)
+    cat = build_cat(mats, actors, scooter.body)
 
     cam_data = bpy.data.cameras.new("Camera")
     cam_data.lens = 32
@@ -1888,7 +1931,7 @@ def main():
     cam_data.dof.aperture_fstop = DOF_FSTOP
     scene.camera = cam
 
-    ride_x = animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes)
+    ride_x = animate(scene, road, scooter, cam, cat)
 
     terrain = build_terrain(road, mats, env, ride_x)
     build_far_terrain(mats, env)

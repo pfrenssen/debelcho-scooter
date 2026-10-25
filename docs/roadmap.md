@@ -5,8 +5,6 @@ the shot.
 
 ## Cat
 
-- **Secondary motion.** The rig drives the pelvis and spine only. Add ear and whisker flutter
-  in the wind, a breathing cycle, and a short head bob that lags the bumps.
 - **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
   and tail), add clumping and some flyaway strands, and use the Principled Hair BSDF for Cycles
   renders.
