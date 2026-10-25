@@ -27,6 +27,13 @@ SEED = 7
 
 TERRAIN_SIZE = 260.0
 TERRAIN_SUBDIV = 400
+FAR_RADIUS = 30000.0  # the far terrain is a polar grid from the edge of the near terrain to here
+RANGE_START = (10000.0, 16000.0)  # the peaks rise over this distance band
+PEAK_HEIGHT = 2400.0
+HAZE_DISTANCE = 20000.0  # aerial perspective e-folding distance on the far terrain
+TREELINE = 1300.0
+SNOWLINE = 1700.0
+SUN_GAP = (20.0, 45.0)  # degrees either side of the sun azimuth: no peaks inside, full beyond
 ROAD_HALF_WIDTH = 1.3
 ROAD_BLEND = 3.5
 ROAD_SINK = 0.06  # terrain under the road sits this far below the road surface
@@ -129,6 +136,20 @@ def base_height(x, y):
     h = 12.0 * fbm(x / 35.0, y / 35.0)
     ring = smoothstep(55.0, 125.0, math.hypot(x, y))
     return h + ring * (10.0 + 8.0 * fbm(x / 60.0 + 5.0, y / 60.0 + 5.0, octaves=3))
+
+
+def far_height(x, y):
+    """Foothills rising away from the near terrain into an alpine range, with a low gap where
+    the sun sets. ridged_multi_fractal spans about 0.15-1.9 (median 1.16)."""
+    r = math.hypot(x, y)
+    gap = abs(wrap_angle(math.atan2(y, x) - math.radians(SUN_AZIMUTH)))
+    open_side = smoothstep(math.radians(SUN_GAP[0]), math.radians(SUN_GAP[1]), gap)
+    foothills = 30.0 + 600.0 * smoothstep(250.0, 8000.0, r) * (0.3 + 0.7 * open_side) \
+        * (0.6 + 0.4 * fbm(x / 2500.0, y / 2500.0, octaves=4, z=11.1))
+    ridges = noise.ridged_multi_fractal(Vector((x / 6000.0, y / 6000.0, 0.5)), 1.0, 2.0, 8, 1.0, 2.0,
+                                        noise_basis='PERLIN_ORIGINAL')
+    peaks = min(max((ridges - 0.6) / 1.2, 0.0), 1.0) ** 1.5
+    return foothills + PEAK_HEIGHT * open_side * smoothstep(*RANGE_START, r) * peaks
 
 
 def centre_y(x):
@@ -411,6 +432,7 @@ def build_materials():
     m = {
         "terrain": terrain_material(),
         "asphalt": asphalt_material(),
+        "alpine": alpine_material(),
         "paint": make_material("RoadPaint", (0.85, 0.82, 0.70), 0.6),
         "wood": make_material("FenceWood", (0.20, 0.12, 0.06), 0.8),
         "wire": make_material("FenceWire", (0.4, 0.4, 0.42), 0.4, metallic=1.0),
@@ -534,6 +556,50 @@ def terrain_material():
     return mat
 
 
+def alpine_material():
+    """Far terrain: forest below the treeline, rock above it and on steep faces, snow above the
+    snowline on gentler slopes. Fades to a haze colour with distance (aerial perspective), as
+    the haze volume only reaches a few hundred metres."""
+    mat = make_material("Alpine", (0.17, 0.15, 0.14), 0.85)
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    out = next(n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL')
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    position = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(coord.outputs['Object'], position.inputs[0])
+    geometry = nt.nodes.new('ShaderNodeNewGeometry')
+    normal = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(geometry.outputs['Normal'], normal.inputs[0])
+    patches = nt.nodes.new('ShaderNodeTexNoise')
+    patches.inputs['Scale'].default_value = 0.002
+    patches.inputs['Detail'].default_value = 8.0
+    nt.links.new(coord.outputs['Object'], patches.inputs['Vector'])
+    jitter = math_node(nt, 'MULTIPLY', math_node(nt, 'SUBTRACT', patches.outputs['Fac'], 0.5), 400.0)
+    height = math_node(nt, 'ADD', position.outputs['Z'], jitter)
+
+    flat = smooth_range(nt, normal.outputs['Z'], 0.55, 0.75)
+    forest = math_node(nt, 'MULTIPLY', smooth_range(nt, height, TREELINE + 150.0, TREELINE - 150.0), flat)
+    snow = math_node(nt, 'MULTIPLY', smooth_range(nt, height, SNOWLINE - 100.0, SNOWLINE + 100.0),
+                     smooth_range(nt, normal.outputs['Z'], 0.45, 0.65))
+    rock = mix_colour(nt, patches.outputs['Fac'], (0.10, 0.09, 0.085), (0.24, 0.21, 0.19))
+    colour = mix_colour(nt, snow, mix_colour(nt, forest, rock, (0.02, 0.04, 0.02)), (0.85, 0.87, 0.9))
+    nt.links.new(colour, bsdf.inputs['Base Color'])
+    nt.links.new(mix_colour(nt, snow, (0.85, 0.85, 0.85), (0.45, 0.45, 0.45)), bsdf.inputs['Roughness'])
+
+    camera = nt.nodes.new('ShaderNodeCameraData')
+    falloff = math_node(nt, 'EXPONENT', math_node(nt, 'DIVIDE', camera.outputs['View Distance'], -HAZE_DISTANCE), 0.0)
+    haze = math_node(nt, 'MINIMUM', math_node(nt, 'SUBTRACT', 1.0, falloff), 0.85)
+    glow = nt.nodes.new('ShaderNodeEmission')
+    glow.inputs['Color'].default_value = (0.5, 0.55, 0.72, 1.0)
+    glow.inputs['Strength'].default_value = 0.25
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    nt.links.new(haze, mix.inputs['Fac'])
+    nt.links.new(bsdf.outputs['BSDF'], mix.inputs[1])
+    nt.links.new(glow.outputs['Emission'], mix.inputs[2])
+    nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
+    return mat
+
+
 def asphalt_material():
     """Asphalt texture; the road UVs run along the road in metres."""
     mat = make_material("Asphalt", (0.04, 0.04, 0.04), 0.9)
@@ -615,6 +681,30 @@ def build_terrain(road, mats, coll, ride_x):
     set_attribute(mesh, "curvature", curvature)
     set_attribute(mesh, "grass_density", [grass_density(road, x, y, ride_x) for x, y, _ in verts])
     return link(bpy.data.objects.new("Terrain", mesh), coll)
+
+
+def build_far_terrain(mats, coll):
+    """Polar grid from just inside the near terrain's edge out to FAR_RADIUS, with radial
+    spacing growing geometrically. Its inner edge follows base_height so the two meshes meet."""
+    inner, rings, segments = 120.0, 260, 1200
+    verts = []
+    for i in range(rings + 1):
+        r = inner * (FAR_RADIUS / inner) ** (i / rings)
+        blend = smoothstep(inner, 400.0, r)
+        for k in range(segments):
+            a = 2.0 * math.pi * k / segments
+            x, y = r * math.cos(a), r * math.sin(a)
+            near = base_height(x, y) - 0.5
+            verts.append((x, y, lerp(near, far_height(x, y), blend) if blend > 0 else near))
+    faces = [(i * segments + k, i * segments + (k + 1) % segments,
+              (i + 1) * segments + (k + 1) % segments, (i + 1) * segments + k)
+             for i in range(rings) for k in range(segments)]
+    mesh = bpy.data.meshes.new("FarTerrain")
+    mesh.from_pydata(verts, [], faces)
+    mesh.shade_smooth()
+    mesh.materials.append(mats["alpine"])
+    print(f"far terrain: highest point {max(v[2] for v in verts):.0f} m")
+    return link(bpy.data.objects.new("FarTerrain", mesh), coll)
 
 
 def set_uvs(mesh, per_vertex):
@@ -1569,7 +1659,7 @@ def main():
     cam_data = bpy.data.cameras.new("Camera")
     cam_data.lens = 32
     cam_data.clip_start = 0.05
-    cam_data.clip_end = 1000.0
+    cam_data.clip_end = FAR_RADIUS * 1.5
     cam = link(bpy.data.objects.new("Camera", cam_data), scene.collection)
     track = cam.constraints.new('TRACK_TO')
     track.target = scooter.target
@@ -1583,6 +1673,7 @@ def main():
     ride_x = animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes)
 
     terrain = build_terrain(road, mats, env, ride_x)
+    build_far_terrain(mats, env)
     build_road(road, mats, env)
     build_speed_bumps(road, mats, env)
     build_fence(road, mats, env)
