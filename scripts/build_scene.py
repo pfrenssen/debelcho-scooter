@@ -1181,6 +1181,48 @@ def add_fur(obj, mats, count, length, direction, density_group=None):
         psys.vertex_group_density = density_group
 
 
+def segment(b, p0, p1, width, depth, overhang, mat):
+    """Ellipsoid spanning p0..p1 (plus overhang at each end): a muscle mass along a bone."""
+    p0, p1 = Vector(p0), Vector(p1)
+    d = p1 - p0
+    b.ellipsoid((p0 + p1) / 2, (depth, width, d.length / 2 + overhang), mat, rot=align_z(d))
+
+
+def toes(b, front, side, y, z, radius, mat):
+    """Four toes in an arc, the middle two furthest forward."""
+    for k, dy in enumerate((-0.017, -0.006, 0.006, 0.017)):
+        reach = 0.004 if k in (1, 2) else 0.0
+        b.ellipsoid((front + reach, side * (y + dy), z), (radius * 1.1, radius, radius * 0.85), mat, segments=12, rings=6)
+
+
+def hind_leg(b, s, mat):
+    """Standing on the hind legs: thigh forward to the knee, shin back down to the hock,
+    and the foot flat on the deck from the hock to the toes."""
+    hip = Vector((-0.075, s * 0.052, 0.225))
+    knee = Vector((0.012, s * 0.066, 0.168))
+    hock = Vector((-0.088, s * 0.056, 0.13))
+    ball = Vector((-0.012, s * 0.052, 0.128))
+    b.ellipsoid((-0.085, s * 0.04, 0.215), (0.06, 0.04, 0.06), mat)  # haunch
+    segment(b, hip, knee, 0.03, 0.04, 0.015, mat)
+    b.limb(knee, hock, 0.02, 0.013, mat)
+    b.ellipsoid(hock, (0.016, 0.013, 0.014), mat, segments=12, rings=6)
+    b.limb(hock + Vector((0.01, 0, 0)), ball, 0.0125, 0.015, mat)
+    toes(b, ball.x + 0.012, s, 0.052, 0.126, 0.0085, mat)
+
+
+def front_leg(b, s, mat):
+    """Shoulder blade, upper arm out to the elbow, forearm up to the wrist, and a paw whose
+    toes curl over the front of the handlebar grip."""
+    shoulder = Vector((0.07, s * 0.055, 0.455))
+    elbow = Vector((0.115, s * 0.1, 0.43))
+    wrist = Vector((0.205, s * 0.126, 0.555))
+    b.ellipsoid((0.05, s * 0.058, 0.475), (0.03, 0.022, 0.048), mat, rot=R(math.radians(30), 'Y'))
+    segment(b, shoulder, elbow, 0.026, 0.028, 0.01, mat)
+    b.limb(elbow, wrist, 0.019, 0.014, mat)
+    b.ellipsoid((0.222, s * 0.135, 0.574), (0.022, 0.024, 0.016), mat)
+    toes(b, 0.239, s, 0.135, 0.569, 0.0085, mat)
+
+
 def build_cat(mats, coll, scooter_body):
     cat_rig = make_empty("CatRig", coll, scooter_body, CAT_PIVOT)
     FUR = 0
@@ -1189,11 +1231,8 @@ def build_cat(mats, coll, scooter_body):
     b.ellipsoid((-0.005, 0, 0.34), (0.085, 0.08, 0.16), FUR, rot=R(math.radians(34), 'Y'))
     b.ellipsoid((0.055, 0, 0.44), (0.075, 0.072, 0.08), FUR)
     for s in (-1, 1):
-        b.ellipsoid((-0.07, s * 0.045, 0.20), (0.075, 0.045, 0.07), FUR)
-        b.limb((-0.03, s * 0.05, 0.17), (-0.075, s * 0.05, 0.135), 0.024, 0.018, FUR)
-        b.ellipsoid((-0.035, s * 0.05, 0.129), (0.048, 0.022, 0.014), FUR)
-        b.limb((0.07, s * 0.05, 0.455), (0.215, s * 0.13, 0.572), 0.024, 0.019, FUR)
-        b.ellipsoid((0.225, s * 0.132, 0.574), (0.026, 0.022, 0.02), FUR)
+        hind_leg(b, s, FUR)
+        front_leg(b, s, FUR)
     body = b.to_object("CatBody", [mats["fur"]], coll, cat_rig)
     remesh(body, 0.0035, 8)
     add_fur(body, mats, 5000, 0.01, (-1.0, 0.0, -0.6))
