@@ -57,9 +57,12 @@ SLIDER_TOP = 0.6  # fraction of FORK_DIR covered by the lower fork sliders
 SWINGARM_PIVOT = Vector((-0.085, 0.0, 0.068))
 SHOCK_Y = 0.032
 SHOCK_TOP = Vector((-0.12, 0.0, 0.13))
-# The cat was modelled standing on a deck 0.117 m high with its paws on a bar at 0.56 m.
+# The cat is modelled standing on a deck 0.117 m high; its paws grip the bar at BAR_DESIGN,
+# under the chin, so the head clears the bar when the cat leans into a climb.
 CAT_OFFSET = Vector((0.0, 0.0, DECK_TOP - 0.117))
-BAR = Vector((0.23, 0.0, 0.56)) + CAT_OFFSET
+BAR_DESIGN = Vector((0.25, 0.0, 0.465))
+MAX_LEAN = 0.25  # radians the cat leans forward into a climb; more brings the chin to the bar
+BAR = BAR_DESIGN + CAT_OFFSET
 BAR_HALF_WIDTH = 0.14
 LANE_OFFSET = -0.45  # metres left of the centre line (negative: right lane)
 BASE_SPEED = 4.5  # m/s
@@ -1392,8 +1395,9 @@ def hind_joints(s):
 
 
 def front_joints(s):
-    return {"shoulder": Vector((0.07, s * 0.055, 0.455)), "elbow": Vector((0.115, s * 0.1, 0.43)),
-            "wrist": Vector((0.205, s * 0.126, 0.555)), "toes": Vector((0.243, s * 0.135, 0.569))}
+    return {"shoulder": Vector((0.07, s * 0.055, 0.455)), "elbow": Vector((0.12, s * 0.105, 0.40)),
+            "wrist": BAR_DESIGN + Vector((-0.025, s * 0.126, -0.005)),
+            "toes": BAR_DESIGN + Vector((0.013, s * 0.135, 0.009))}
 
 
 def cat_bones():
@@ -1504,8 +1508,8 @@ def front_leg(b, s, mat):
     b.ellipsoid((0.05, s * 0.058, 0.475), (0.03, 0.022, 0.048), mat, rot=R(math.radians(30), 'Y'))
     segment(b, shoulder, elbow, 0.026, 0.028, 0.01, mat)
     b.limb(elbow, wrist, 0.019, 0.014, mat)
-    b.ellipsoid((0.222, s * 0.135, 0.574), (0.022, 0.024, 0.016), mat)
-    toes(b, 0.239, s, 0.135, 0.569, 0.0085, mat)
+    b.ellipsoid(BAR_DESIGN + Vector((-0.008, s * 0.135, 0.014)), (0.022, 0.024, 0.016), mat)
+    toes(b, BAR_DESIGN.x + 0.009, s, 0.135, BAR_DESIGN.z + 0.009, 0.0085, mat)
 
 
 def build_cat(mats, coll, scooter_body):
@@ -1802,7 +1806,7 @@ def animate(scene, road, scooter, cam, cat):
         # The cat leans into climbs and back on descents, crouches a little uphill, and absorbs
         # the bumps by dropping its hips; IK keeps the paws on the grips and the feet planted.
         pitch = math.atan(slope)
-        body_lean += (min(max(1.2 * pitch, -0.12), 0.35) - body_lean) * 0.08
+        body_lean += (min(max(1.2 * pitch, -0.12), MAX_LEAN) - body_lean) * 0.08
         drop = (0.003 * math.sin(2 * math.pi * 1.6 * t) + min(max(susp.cat * 0.5, -0.025), 0.02)
                 - 0.04 * max(pitch, 0.0))
         # Breathing: about 0.45 Hz on the flat, up to twice that on the climb.
@@ -1810,7 +1814,7 @@ def animate(scene, road, scooter, cam, cat):
         pose_cat(cat.rig, body_lean, drop, 0.015 * math.sin(breath_phase), frame)
         # Cats keep their head level: counter the scooter's lean and the body's lean, and look
         # into the turn. The neck spring adds a nod that lags each bump.
-        nod = min(max(susp.head * 15.0, -0.2), 0.2)
+        nod = min(max(susp.head * 15.0, -0.2), 0.08)  # chin down only a little: the bar is below it
         head_rig.rotation_euler = (lean * 0.6, 0.05 * math.sin(2 * math.pi * 0.5 * t) - body_lean * 0.7 + nod,
                                    min(max(kappa * 1.5, -0.25), 0.25))
         head_rig.keyframe_insert("rotation_euler", frame=frame)
