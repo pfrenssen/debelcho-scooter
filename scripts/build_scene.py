@@ -19,6 +19,7 @@ from mathutils import Matrix, Vector, kdtree, noise
 
 ROOT = Path(__file__).resolve().parent.parent
 BLEND_PATH = ROOT / "build" / "cat_scooter.blend"
+TEXTURES = ROOT / "assets" / "textures"  # fetched by scripts/fetch_textures.py
 
 FPS = 24
 FRAME_END = 288
@@ -30,6 +31,8 @@ ROAD_HALF_WIDTH = 1.3
 ROAD_BLEND = 3.5
 ROAD_SINK = 0.06  # terrain under the road sits this far below the road surface
 ROAD_STEP = 0.25
+GRASS_DENSITY = 160.0  # clumps per square metre at the road verge
+GRASS_CLUMPS = 6  # clump variants
 
 # Scooter local frame: +X forward, +Y left, +Z up, origin on the ground below the deck.
 WHEEL_R = 0.075
@@ -418,14 +421,14 @@ def random_tint_material(name, low, high, roughness):
 
 def build_materials():
     m = {
-        "grass": textured_material("Grass", (0.035, 0.12, 0.02), (0.20, 0.32, 0.06), 0.06, 4.0, 0.9),
-        "asphalt": textured_material("Asphalt", (0.03, 0.03, 0.03), (0.05, 0.05, 0.05), 8.0, 40.0, 0.95, 0.1),
+        "terrain": terrain_material(),
+        "asphalt": asphalt_material(),
         "paint": make_material("RoadPaint", (0.85, 0.82, 0.70), 0.6),
         "wood": make_material("FenceWood", (0.20, 0.12, 0.06), 0.8),
         "wire": make_material("FenceWire", (0.4, 0.4, 0.42), 0.4, metallic=1.0),
         "bark": make_material("Bark", (0.10, 0.06, 0.035), 0.9),
         "leaves": random_tint_material("Leaves", (0.02, 0.10, 0.025), (0.12, 0.25, 0.04), 0.8),
-        "blades": make_material("GrassBlades", (0.07, 0.20, 0.03), 0.8),
+        "blades": grass_blade_material(),
         "rock": textured_material("Rock", (0.08, 0.075, 0.07), (0.16, 0.15, 0.13), 3.0, 12.0, 0.8, 0.4),
         "frame": make_material("ScooterOrange", (0.90, 0.22, 0.02), 0.35, inputs={"Coat Weight": 0.6}),
         "rubber": make_material("Rubber", (0.015, 0.015, 0.015), 0.85),
@@ -450,6 +453,136 @@ def build_materials():
     return m
 
 
+def load_image(asset, name):
+    img = bpy.data.images.load(str(TEXTURES / asset / f"{name}.jpg"), check_existing=True)
+    if name != "diff":
+        img.colorspace_settings.name = 'Non-Color'
+    return img
+
+
+def texture_set(nt, asset, size, uv):
+    """Diffuse, roughness and normal-map colour sockets of a Poly Haven texture repeating every
+    size metres; uv is in metres."""
+    mapping = nt.nodes.new('ShaderNodeMapping')
+    mapping.inputs['Scale'].default_value = (1.0 / size,) * 3
+    nt.links.new(uv, mapping.inputs['Vector'])
+    sockets = []
+    for name in ("diff", "rough", "nor_gl"):
+        tex = nt.nodes.new('ShaderNodeTexImage')
+        tex.image = load_image(asset, name)
+        nt.links.new(mapping.outputs['Vector'], tex.inputs['Vector'])
+        sockets.append(tex.outputs['Color'])
+    return sockets
+
+
+def smooth_range(nt, value, lo, hi):
+    """0 below lo, 1 above hi, smoothstep in between (reversed when lo > hi)."""
+    node = nt.nodes.new('ShaderNodeMapRange')
+    node.interpolation_type = 'SMOOTHSTEP'
+    node.inputs['From Min'].default_value = lo
+    node.inputs['From Max'].default_value = hi
+    nt.links.new(value, node.inputs['Value'])
+    return node.outputs['Result']
+
+
+def apply_texture(nt, bsdf, sockets):
+    colour, rough, normal = sockets
+    nt.links.new(colour, bsdf.inputs['Base Color'])
+    nt.links.new(rough, bsdf.inputs['Roughness'])
+    normal_map = nt.nodes.new('ShaderNodeNormalMap')
+    normal_map.uv_map = "UVMap"
+    nt.links.new(normal, normal_map.inputs['Color'])
+    nt.links.new(normal_map.outputs['Normal'], bsdf.inputs['Normal'])
+
+
+def terrain_material():
+    """Grass ground, with dry ground on crests, rock on steep slopes, and darker hollows.
+    Crests and hollows come from the mesh attribute 'curvature' (positive on crests)."""
+    mat = make_material("Terrain", (0.1, 0.12, 0.05), 0.9)
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.uv_map = "UVMap"
+    grass = texture_set(nt, "grass_ground", 2.5, uv.outputs['UV'])
+    dry = texture_set(nt, "dry_ground_01", 4.0, uv.outputs['UV'])
+    rock = texture_set(nt, "aerial_rocks_02", 20.0, uv.outputs['UV'])
+    # grass_ground averages olive-brown (0.43, 0.38, 0.24); shift it towards green.
+    greener = nt.nodes.new('ShaderNodeHueSaturation')
+    greener.inputs['Hue'].default_value = 0.56
+    greener.inputs['Saturation'].default_value = 1.3
+    nt.links.new(grass[0], greener.inputs['Color'])
+    grass[0] = greener.outputs['Color']
+
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    breakup = nt.nodes.new('ShaderNodeTexNoise')
+    breakup.inputs['Scale'].default_value = 0.12
+    breakup.inputs['Detail'].default_value = 6.0
+    nt.links.new(coord.outputs['Object'], breakup.inputs['Vector'])
+    jitter = math_node(nt, 'SUBTRACT', breakup.outputs['Fac'], 0.5)
+
+    geometry = nt.nodes.new('ShaderNodeNewGeometry')
+    normal = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(geometry.outputs['Normal'], normal.inputs[0])
+    steep = math_node(nt, 'SUBTRACT', 1.0, normal.outputs['Z'])
+    rock_mask = smooth_range(nt, math_node(nt, 'ADD', steep, math_node(nt, 'MULTIPLY', jitter, 0.2)), 0.25, 0.38)
+
+    curvature = nt.nodes.new('ShaderNodeAttribute')
+    curvature.attribute_name = "curvature"
+    # Curvature is about ±0.5 at the 5th/95th percentile.
+    crest = math_node(nt, 'ADD', curvature.outputs['Fac'], math_node(nt, 'MULTIPLY', jitter, 0.6))
+    dry_mask = smooth_range(nt, crest, 0.45, 0.9)
+    hollow = smooth_range(nt, curvature.outputs['Fac'], -0.7, -0.2)
+
+    layers = []
+    for g, d, r in zip(grass, dry, rock):
+        layers.append(mix_colour(nt, rock_mask, mix_colour(nt, dry_mask, g, d), r))
+    shade = mix_colour(nt, hollow, (0.6, 0.6, 0.6), (1.0, 1.0, 1.0))
+    macro = nt.nodes.new('ShaderNodeTexNoise')
+    macro.inputs['Scale'].default_value = 0.02
+    nt.links.new(coord.outputs['Object'], macro.inputs['Vector'])
+    macro_shade = nt.nodes.new('ShaderNodeValToRGB')
+    ramp_colors(macro_shade, (0.75, 0.75, 0.7), (1.15, 1.15, 1.1), (0.3, 0.7))
+    nt.links.new(macro.outputs['Fac'], macro_shade.inputs['Fac'])
+    layers[0] = mix_colour(nt, 1.0, mix_colour(nt, 1.0, layers[0], shade, 'MULTIPLY'),
+                           macro_shade.outputs['Color'], 'MULTIPLY')
+    apply_texture(nt, bsdf, layers)
+    return mat
+
+
+def asphalt_material():
+    """Asphalt texture; the road UVs run along the road in metres."""
+    mat = make_material("Asphalt", (0.04, 0.04, 0.04), 0.9)
+    nt = mat.node_tree
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.uv_map = "UVMap"
+    apply_texture(nt, principled_node(mat), texture_set(nt, "asphalt_02", 3.0, uv.outputs['UV']))
+    return mat
+
+
+def grass_blade_material():
+    """Dark at the root, lighter and yellower at the tip (UV v), varied per clump instance,
+    and partly translucent for backlight from the low sun."""
+    mat = make_material("GrassBlades", (0.07, 0.16, 0.03), 0.6)
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    out = next(n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL')
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    split = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(uv.outputs['UV'], split.inputs[0])
+    info = nt.nodes.new('ShaderNodeObjectInfo')
+    tip = mix_colour(nt, info.outputs['Random'], (0.10, 0.20, 0.03), (0.30, 0.28, 0.08))
+    colour = mix_colour(nt, smooth_range(nt, split.outputs['Y'], 0.0, 0.8), (0.015, 0.035, 0.008), tip)
+    nt.links.new(colour, bsdf.inputs['Base Color'])
+    translucent = nt.nodes.new('ShaderNodeBsdfTranslucent')
+    nt.links.new(colour, translucent.inputs['Color'])
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    mix.inputs['Fac'].default_value = 0.35
+    nt.links.new(bsdf.outputs['BSDF'], mix.inputs[1])
+    nt.links.new(translucent.outputs['BSDF'], mix.inputs[2])
+    nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
+    return mat
+
+
 def strand_material():
     """Black fur strands that turn slightly grey towards the tips."""
     mat = make_material("FurStrands", (0.006, 0.006, 0.007), 0.6)
@@ -465,7 +598,7 @@ def strand_material():
 # --------------------------------------------------------------------------- environment
 
 
-def build_terrain(road, mats, coll):
+def build_terrain(road, mats, coll, ride_x):
     n = TERRAIN_SUBDIV + 1
     half = TERRAIN_SIZE / 2.0
     step = TERRAIN_SIZE / TERRAIN_SUBDIV
@@ -480,8 +613,43 @@ def build_terrain(road, mats, coll):
     mesh = bpy.data.meshes.new("Terrain")
     mesh.from_pydata(verts, [], faces)
     mesh.shade_smooth()
-    mesh.materials.append(mats["grass"])
-    link(bpy.data.objects.new("Terrain", mesh), coll)
+    mesh.materials.append(mats["terrain"])
+    set_uvs(mesh, [(x, y) for x, y, _ in verts])
+
+    # Negative Laplacian of the height over a 4-cell stencil: positive on crests.
+    k = 4
+    curvature = []
+    for j in range(n):
+        for i in range(n):
+            z = verts[j * n + i][2]
+            around = [verts[min(max(jj, 0), n - 1) * n + min(max(ii, 0), n - 1)][2]
+                      for jj, ii in ((j, i - k), (j, i + k), (j - k, i), (j + k, i))]
+            curvature.append(-(sum(around) - 4 * z) / (k * step) ** 2)
+    ranked = sorted(curvature)
+    print("curvature percentiles 5/50/95:", [round(ranked[int(len(ranked) * p)], 4) for p in (0.05, 0.5, 0.95)])
+    set_attribute(mesh, "curvature", curvature)
+    set_attribute(mesh, "grass_density", [grass_density(road, x, y, ride_x) for x, y, _ in verts])
+    return link(bpy.data.objects.new("Terrain", mesh), coll)
+
+
+def set_uvs(mesh, per_vertex):
+    layer = mesh.uv_layers.new(name="UVMap")
+    index = [0] * len(mesh.loops)
+    mesh.loops.foreach_get("vertex_index", index)
+    layer.data.foreach_set("uv", [c for i in index for c in per_vertex[i]])
+
+
+def set_attribute(mesh, name, values):
+    attribute = mesh.attributes.new(name, 'FLOAT', 'POINT')
+    attribute.data.foreach_set("value", values)
+
+
+def grass_density(road, x, y, ride_x):
+    """Relative grass density: full on the verge, thinning away from the road and outside the
+    stretch the camera sees."""
+    edge = road.distance(x, y)[1] - ROAD_HALF_WIDTH
+    along = smoothstep(ride_x[0] - 18.0, ride_x[0] - 8.0, x) * (1.0 - smoothstep(ride_x[1] + 10.0, ride_x[1] + 20.0, x))
+    return along * smoothstep(0.05, 0.3, edge) * lerp(1.0, 0.06, smoothstep(2.0, 20.0, edge))
 
 
 def build_road(road, mats, coll):
@@ -497,6 +665,8 @@ def build_road(road, mats, coll):
     mesh = bpy.data.meshes.new("Road")
     mesh.from_pydata(verts, [], faces)
     mesh.materials.append(mats["asphalt"])
+    across = (w + 0.15, w, -w, -w - 0.15)
+    set_uvs(mesh, [(s, v) for s in road.cum for v in across])
     link(bpy.data.objects.new("Road", mesh), coll)
 
     # Dashed centre line: 0.9 m dashes every 2 m.
@@ -594,24 +764,96 @@ def scatter_trees(road, mats, coll, rng):
         placed += 1
 
 
-def scatter_ground_detail(road, mats, coll, rng, ride_x):
-    """Grass tufts and rocks near the stretch of road the ride covers, merged into two meshes."""
-    lo, hi = ride_x[0] - 10.0, ride_x[1] + 15.0
-    tufts = MeshBuilder()
-    count = 0
-    while count < 900:
-        x, y = rng.uniform(lo, hi), rng.uniform(-20, 20)
-        d = road.distance(x, y)[1]
-        if not ROAD_HALF_WIDTH + 0.1 < d < 7.0:
-            continue
-        z = road.terrain_height(x, y)
-        for _ in range(7):
-            tilt = R(rng.uniform(-0.35, 0.35), 'X') @ R(rng.uniform(-0.35, 0.35), 'Y')
-            offset = T(x + rng.uniform(-0.06, 0.06), y + rng.uniform(-0.06, 0.06), z - 0.02)
-            tufts.cone(offset @ tilt, 0.012, rng.uniform(0.12, 0.28), mat=0, segments=4, smooth_shade=False)
-        count += 1
-    tufts.to_object("GrassTufts", [mats["blades"]], coll)
+def grass_clump(rng, mat):
+    """A clump of curved, tapering blades; UV v runs from root (0) to tip (1)."""
+    bm = bmesh.new()
+    uv = bm.loops.layers.uv.new("UVMap")
+    for _ in range(rng.randint(10, 18)):
+        base = Vector((rng.gauss(0, 0.025), rng.gauss(0, 0.025), -0.01))
+        height = rng.uniform(0.07, 0.22)
+        width = rng.uniform(0.003, 0.006)
+        a = rng.uniform(0, 2 * math.pi)
+        lean = Vector((math.cos(a), math.sin(a), 0.0))
+        side = Vector((0, 0, 1)).cross(lean)
+        bend = rng.uniform(0.15, 0.5) * height
+        rows = []
+        for t in (0.0, 0.35, 0.7):
+            centre = base + Vector((0, 0, height * t)) + lean * bend * t * t
+            half = width * (1.0 - t) ** 0.7
+            rows.append(((bm.verts.new(centre - side * half), bm.verts.new(centre + side * half)), t))
+        tip = bm.verts.new(base + Vector((0, 0, height)) + lean * bend)
+        for ((l0, r0), t0), ((l1, r1), t1) in zip(rows, rows[1:]):
+            face = bm.faces.new((l0, r0, r1, l1))
+            for loop, v in zip(face.loops, (t0, t0, t1, t1)):
+                loop[uv].uv = (0.5, v)
+        (l, r), t = rows[-1]
+        face = bm.faces.new((l, r, tip))
+        for loop, v in zip(face.loops, (t, t, 1.0)):
+            loop[uv].uv = (0.5, v)
+    mesh = bpy.data.meshes.new("GrassClump")
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.materials.append(mat)
+    return mesh
 
+
+def random_value(nodes, kind, lo, hi, seed):
+    node = nodes.new('FunctionNodeRandomValue')
+    node.data_type = kind
+    sock = 'INT' if kind == 'INT' else 'VALUE'
+    socket(node.inputs, "Min", sock).default_value = lo
+    socket(node.inputs, "Max", sock).default_value = hi
+    node.inputs['Seed'].default_value = seed
+    return socket(node.outputs, "Value", sock)
+
+
+def build_grass(mats, coll, terrain, rng):
+    """Grass clumps instanced by geometry nodes over the terrain, with the density taken from
+    the terrain attribute 'grass_density'."""
+    clumps = bpy.data.collections.new("GrassClumps")  # not linked to the scene: instanced only
+    for k in range(GRASS_CLUMPS):
+        clumps.objects.link(bpy.data.objects.new(f"GrassClump.{k}", grass_clump(rng, mats["blades"])))
+
+    tree = bpy.data.node_groups.new("GrassScatter", 'GeometryNodeTree')
+    tree.interface.new_socket("Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    nodes, links = tree.nodes, tree.links
+    source = nodes.new('GeometryNodeObjectInfo')
+    source.inputs['Object'].default_value = terrain
+    density = nodes.new('GeometryNodeInputNamedAttribute')
+    density.data_type = 'FLOAT'
+    density.inputs['Name'].default_value = "grass_density"
+    scaled = nodes.new('ShaderNodeMath')
+    scaled.operation = 'MULTIPLY'
+    scaled.inputs[1].default_value = GRASS_DENSITY
+    links.new(density.outputs['Attribute'], scaled.inputs[0])
+    points = nodes.new('GeometryNodeDistributePointsOnFaces')
+    points.distribute_method = 'RANDOM'
+    points.inputs['Seed'].default_value = SEED
+    links.new(source.outputs['Geometry'], points.inputs['Mesh'])
+    links.new(scaled.outputs[0], points.inputs['Density'])
+    variants = nodes.new('GeometryNodeCollectionInfo')
+    variants.inputs['Collection'].default_value = clumps
+    variants.inputs['Separate Children'].default_value = True
+    variants.inputs['Reset Children'].default_value = True
+    yaw = nodes.new('ShaderNodeCombineXYZ')
+    links.new(random_value(nodes, 'FLOAT', 0.0, 2 * math.pi, 1), yaw.inputs['Z'])
+    instances = nodes.new('GeometryNodeInstanceOnPoints')
+    instances.inputs['Pick Instance'].default_value = True
+    links.new(points.outputs['Points'], instances.inputs['Points'])
+    links.new(variants.outputs['Instances'], instances.inputs['Instance'])
+    links.new(random_value(nodes, 'INT', 0, GRASS_CLUMPS - 1, 2), instances.inputs['Instance Index'])
+    links.new(yaw.outputs['Vector'], instances.inputs['Rotation'])
+    links.new(random_value(nodes, 'FLOAT', 0.6, 1.4, 3), instances.inputs['Scale'])
+    out = nodes.new('NodeGroupOutput')
+    links.new(instances.outputs['Instances'], out.inputs[0])
+
+    grass = link(bpy.data.objects.new("Grass", bpy.data.meshes.new("Grass")), coll)
+    grass.modifiers.new("Scatter", 'NODES').node_group = tree
+
+
+def scatter_rocks(road, mats, coll, rng, ride_x):
+    """Rocks near the stretch of road the ride covers, merged into one mesh."""
+    lo, hi = ride_x[0] - 10.0, ride_x[1] + 15.0
     rocks = MeshBuilder()
     count = 0
     while count < 80:
@@ -1313,12 +1555,13 @@ def main():
 
     ride_x = animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes)
 
-    build_terrain(road, mats, env)
+    terrain = build_terrain(road, mats, env, ride_x)
     build_road(road, mats, env)
     build_speed_bumps(road, mats, env)
     build_fence(road, mats, env)
     scatter_trees(road, mats, env, rng)
-    scatter_ground_detail(road, mats, env, rng, ride_x)
+    scatter_rocks(road, mats, env, rng, ride_x)
+    build_grass(mats, env, terrain, rng)
     build_world(scene)
     build_haze(env)
     configure_render(scene)
