@@ -42,6 +42,15 @@ ROAD_STEP = 0.25
 GRASS_DENSITY = 160.0  # clumps per square metre at the road verge
 GRASS_CLUMPS = 6  # clump variants
 
+# Wind: gusts are noise blobs drifting downwind; grass clumps and trees lean downwind with the
+# gust strength and sway around that lean.
+WIND_HEADING = 120.0  # degrees from +X towards +Y the wind blows to
+GUST_SPEED = 6.0  # m/s
+GUST_SIZE = 18.0  # metres
+WIND_CALM = 0.2  # lean between gusts, as a fraction of the lean in a full gust
+GRASS_LEAN = 0.35  # radians a grass clump leans in a full gust
+TREE_LEAN = 0.02  # radians a fir leans in a full gust: 0.24 m at the top of a 12 m fir
+
 # Scooter local frame: +X forward, +Y left, +Z up, origin on the ground below the deck.
 # Modelled on the Segway Ninebot Max G2 (1.26 m tall, 20 cm deck, 10-inch tyres), scaled to the
 # cat: SCOOTER_SCALE of the real size puts the handlebar where the cat's paws are.
@@ -696,6 +705,53 @@ def strand_material():
 # --------------------------------------------------------------------------- environment
 
 
+def wind_direction():
+    heading = math.radians(WIND_HEADING)
+    return (math.cos(heading), math.sin(heading), 0.0)
+
+
+def wind_strength(nt, position, phase, sway_hz):
+    """Geometry nodes field: the wind at position as a fraction of the lean in a full gust,
+    swaying at sway_hz with the given phase (radians)."""
+    seconds = nt.nodes.new('GeometryNodeInputSceneTime').outputs['Seconds']
+
+    # Gusts drift downwind at GUST_SPEED and slowly change shape.
+    drift = nt.nodes.new('ShaderNodeVectorMath')
+    drift.operation = 'SCALE'
+    drift.inputs[0].default_value = wind_direction()
+    nt.links.new(math_node(nt, 'MULTIPLY', seconds, -GUST_SPEED), drift.inputs['Scale'])
+    shifted = nt.nodes.new('ShaderNodeVectorMath')
+    shifted.operation = 'ADD'
+    nt.links.new(position, shifted.inputs[0])
+    nt.links.new(drift.outputs['Vector'], shifted.inputs[1])
+    gusts = nt.nodes.new('ShaderNodeTexNoise')
+    gusts.noise_dimensions = '4D'
+    gusts.inputs['Scale'].default_value = 1.0 / GUST_SIZE
+    gusts.inputs['Detail'].default_value = 1.0
+    nt.links.new(shifted.outputs['Vector'], gusts.inputs['Vector'])
+    nt.links.new(math_node(nt, 'MULTIPLY', seconds, 0.1), gusts.inputs['W'])
+    gust = smooth_range(nt, gusts.outputs['Fac'], 0.42, 0.68)
+
+    cycles = math_node(nt, 'MULTIPLY', seconds, 2 * math.pi * sway_hz)
+    sway = math_node(nt, 'SINE', math_node(nt, 'ADD', cycles, phase), 0.0)
+    return math_node(nt, 'MULTIPLY', math_node(nt, 'ADD', gust, WIND_CALM),
+                     math_node(nt, 'ADD', math_node(nt, 'MULTIPLY', sway, 0.4), 1.0))
+
+
+def lean_downwind(nt, rotation, angle):
+    """Rotation socket: rotation (an Euler vector socket) followed by a lean of angle radians
+    downwind, about the instance origin."""
+    tilt = nt.nodes.new('FunctionNodeAxisAngleToRotation')
+    dx, dy, _ = wind_direction()
+    tilt.inputs['Axis'].default_value = (-dy, dx, 0.0)  # up × wind direction: tops go downwind
+    nt.links.new(angle, tilt.inputs['Angle'])
+    rotate = nt.nodes.new('FunctionNodeRotateRotation')
+    rotate.rotation_space = 'GLOBAL'
+    nt.links.new(rotation, rotate.inputs['Rotation'])
+    nt.links.new(tilt.outputs['Rotation'], rotate.inputs['Rotate By'])
+    return rotate.outputs['Rotation']
+
+
 def build_terrain(road, mats, coll, ride_x):
     n = TERRAIN_SUBDIV + 1
     half = TERRAIN_SIZE / 2.0
@@ -870,10 +926,16 @@ def load_tree_meshes():
 
 
 def scatter_trees(road, coll, rng, ride_x):
-    """Fir trees in clusters away from the road: full LOD1 detail near the ride, LOD2 further out."""
+    """Fir trees in clusters away from the road: full LOD1 detail near the ride, LOD2 further out.
+    The trees are instanced by geometry nodes on the vertices of a point mesh, so each one can
+    lean with the wind about its base. Displacing the tree vertices in the shader instead made
+    the Radeon 680M time out and reset during animation renders."""
     meshes = load_tree_meshes()
-    placed = 0
-    while placed < 300:
+    variants = bpy.data.collections.new("TreeVariants")  # not linked to the scene: instanced only
+    for k, mesh in enumerate(meshes["LOD1"] + meshes["LOD2"]):
+        variants.objects.link(bpy.data.objects.new(f"TreeVariant.{k}", mesh))
+    points, variant, yaw, scale = [], [], [], []
+    while len(points) < 300:
         x, y = rng.uniform(-120, 120), rng.uniform(-120, 120)
         distance = road.distance(x, y)[1]
         if distance < 6.0 + rng.uniform(0, 4):
@@ -881,12 +943,46 @@ def scatter_trees(road, coll, rng, ride_x):
         if noise.noise(Vector((x / 30.0, y / 30.0, 3.3))) < -0.05:
             continue
         near = distance < 30.0 and ride_x[0] - 30.0 < x < ride_x[1] + 30.0
-        mesh = rng.choice(meshes["LOD1" if near else "LOD2"])
-        obj = link(bpy.data.objects.new(f"Tree.{placed:03d}", mesh), coll,
-                   location=(x, y, road.terrain_height(x, y) - 0.1))
-        obj.rotation_euler.z = rng.uniform(0, 2 * math.pi)
-        obj.scale = (rng.uniform(0.35, 0.8),) * 3
-        placed += 1
+        variant.append(rng.randrange(3) + (0 if near else 3))
+        points.append((x, y, road.terrain_height(x, y) - 0.1))
+        yaw.append(rng.uniform(0, 2 * math.pi))
+        scale.append(rng.uniform(0.35, 0.8))
+    mesh = bpy.data.meshes.new("TreePoints")
+    mesh.from_pydata(points, [], [])
+    for name, values in (("variant", variant), ("yaw", yaw), ("scale", scale)):
+        set_attribute(mesh, name, values)
+
+    tree = bpy.data.node_groups.new("TreeScatter", 'GeometryNodeTree')
+    tree.interface.new_socket("Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
+    tree.interface.new_socket("Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    nodes, links = tree.nodes, tree.links
+
+    def attribute(name):
+        node = nodes.new('GeometryNodeInputNamedAttribute')
+        node.data_type = 'FLOAT'
+        node.inputs['Name'].default_value = name
+        return node.outputs['Attribute']
+
+    collection = nodes.new('GeometryNodeCollectionInfo')
+    collection.inputs['Collection'].default_value = variants
+    collection.inputs['Separate Children'].default_value = True
+    collection.inputs['Reset Children'].default_value = True
+    heading = nodes.new('ShaderNodeCombineXYZ')
+    links.new(attribute("yaw"), heading.inputs['Z'])
+    wind = wind_strength(tree, nodes.new('GeometryNodeInputPosition').outputs['Position'],
+                         random_value(nodes, 'FLOAT', 0.0, 2 * math.pi, 5), 0.35)
+    rotation = lean_downwind(tree, heading.outputs['Vector'], math_node(tree, 'MULTIPLY', wind, TREE_LEAN))
+    instances = nodes.new('GeometryNodeInstanceOnPoints')
+    instances.inputs['Pick Instance'].default_value = True
+    links.new(nodes.new('NodeGroupInput').outputs[0], instances.inputs['Points'])
+    links.new(collection.outputs['Instances'], instances.inputs['Instance'])
+    links.new(attribute("variant"), instances.inputs['Instance Index'])
+    links.new(rotation, instances.inputs['Rotation'])
+    links.new(attribute("scale"), instances.inputs['Scale'])
+    links.new(instances.outputs['Instances'], nodes.new('NodeGroupOutput').inputs[0])
+
+    trees = link(bpy.data.objects.new("Trees", mesh), coll)
+    trees.modifiers.new("Scatter", 'NODES').node_group = tree
 
 
 def grass_clump(rng, mat):
@@ -962,12 +1058,18 @@ def build_grass(mats, coll, terrain, rng):
     variants.inputs['Reset Children'].default_value = True
     yaw = nodes.new('ShaderNodeCombineXYZ')
     links.new(random_value(nodes, 'FLOAT', 0.0, 2 * math.pi, 1), yaw.inputs['Z'])
+    # Each clump tilts downwind about its root, by the wind at its root. Tilting whole clumps
+    # here costs one evaluation per clump; displacing the 53M blade vertices in the shader
+    # stalled the GPU until the driver reset it.
+    wind = wind_strength(tree, nodes.new('GeometryNodeInputPosition').outputs['Position'],
+                         random_value(nodes, 'FLOAT', 0.0, 2 * math.pi, 4), 1.2)
+    rotation = lean_downwind(tree, yaw.outputs['Vector'], math_node(tree, 'MULTIPLY', wind, GRASS_LEAN))
     instances = nodes.new('GeometryNodeInstanceOnPoints')
     instances.inputs['Pick Instance'].default_value = True
     links.new(points.outputs['Points'], instances.inputs['Points'])
     links.new(variants.outputs['Instances'], instances.inputs['Instance'])
     links.new(random_value(nodes, 'INT', 0, GRASS_CLUMPS - 1, 2), instances.inputs['Instance Index'])
-    links.new(yaw.outputs['Vector'], instances.inputs['Rotation'])
+    links.new(rotation, instances.inputs['Rotation'])
     links.new(random_value(nodes, 'FLOAT', 0.6, 1.4, 3), instances.inputs['Scale'])
     out = nodes.new('NodeGroupOutput')
     links.new(instances.outputs['Instances'], out.inputs[0])

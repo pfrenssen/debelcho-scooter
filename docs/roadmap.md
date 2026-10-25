@@ -15,8 +15,9 @@ the shot.
 
 ## Environment
 
-- **Wind.** Grass and trees sway with slow gusts travelling across the hills, instead of
-  standing frozen.
+- **Branch motion.** Grass clumps and firs lean as rigid wholes with the gusts. Bending
+  trunks and fluttering branches need per-vertex deformation; doing that as shader displacement
+  made the Radeon 680M time out and reset during animation renders.
 - **Wheel interaction.** The scooter pushes the verge grass aside and raises a faint dust trail.
 - **Road detail.** Painted edge lines, a gravel shoulder, worn tyre tracks, repair patches, a
   slight crown, and grit along the edges where the road meets the grass.
