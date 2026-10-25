@@ -437,8 +437,7 @@ def build_materials():
         "brakelight": make_material("BrakeLight", (0.8, 0.02, 0.02), 0.3, emission=(1.0, 0.03, 0.02), strength=12.0),
         "underglow": make_material("Underglow", (0.1, 0.8, 1.0), 0.3, emission=(0.1, 0.8, 1.0), strength=12.0),
         "screen": make_material("Display", (0.05, 0.4, 0.6), 0.2, emission=(0.1, 0.6, 1.0), strength=2.0),
-        "fur": make_material("BlackFur", (0.008, 0.008, 0.009), 0.5,
-                             inputs={"Sheen Weight": 0.15, "Sheen Tint": (0.6, 0.6, 0.65, 1.0)}),
+        "fur": make_material("BlackFur", (0.008, 0.008, 0.009), 0.9),  # skin under the fur strands
         "eye": make_material("CatEye", (0.75, 0.62, 0.04), 0.05, emission=(0.75, 0.62, 0.04), strength=0.4),
         "pupil": make_material("Pupil", (0.0, 0.0, 0.0), 0.05),
         "nose": make_material("CatNose", (0.10, 0.04, 0.05), 0.4),
@@ -1235,7 +1234,7 @@ def build_cat(mats, coll, scooter_body):
         front_leg(b, s, FUR)
     body = b.to_object("CatBody", [mats["fur"]], coll, cat_rig)
     remesh(body, 0.0035, 8)
-    add_fur(body, mats, 5000, 0.01, (-1.0, 0.0, -0.6))
+    add_fur(body, mats, 5000, 0.012, (-1.0, 0.0, -0.6))
 
     c = MeshBuilder(CAT_PIVOT)
     neck_dir = Vector((0.055, 0, 0.16)).normalized()
@@ -1298,7 +1297,7 @@ def build_tail(mats, coll, cat_rig):
     bend = tail.modifiers.new("Bend", 'CURVE')
     bend.object = curve
     bend.deform_axis = 'POS_X'
-    add_fur(tail, mats, 900, 0.012, (0.8, 0.0, 0.0))
+    add_fur(tail, mats, 900, 0.0144, (0.8, 0.0, 0.0))
     return curve
 
 
@@ -1319,7 +1318,7 @@ def build_head(mats, coll, cat_rig):
     for v in head.data.vertices:
         p = v.co + NECK
         group.add([v.index], min(smoothstep(r0, r1, (p - c).length) for c, r0, r1 in bare), 'REPLACE')
-    add_fur(head, mats, 2500, 0.006, (-1.2, 0.0, 0.0), density_group=group.name)
+    add_fur(head, mats, 2500, 0.0072, (-1.2, 0.0, 0.0), density_group=group.name)
 
     f = MeshBuilder(NECK)
     for s in (-1, 1):
