@@ -407,18 +407,6 @@ def textured_material(name, low, high, patch_scale, bump_scale, roughness, bump_
     return mat
 
 
-def random_tint_material(name, low, high, roughness):
-    """Colour varies per object instance through Object Info > Random."""
-    mat = make_material(name, low, roughness)
-    nt = mat.node_tree
-    info = nt.nodes.new('ShaderNodeObjectInfo')
-    ramp = nt.nodes.new('ShaderNodeValToRGB')
-    ramp_colors(ramp, low, high)
-    nt.links.new(info.outputs['Random'], ramp.inputs['Fac'])
-    nt.links.new(ramp.outputs['Color'], principled_node(mat).inputs['Base Color'])
-    return mat
-
-
 def build_materials():
     m = {
         "terrain": terrain_material(),
@@ -426,8 +414,6 @@ def build_materials():
         "paint": make_material("RoadPaint", (0.85, 0.82, 0.70), 0.6),
         "wood": make_material("FenceWood", (0.20, 0.12, 0.06), 0.8),
         "wire": make_material("FenceWire", (0.4, 0.4, 0.42), 0.4, metallic=1.0),
-        "bark": make_material("Bark", (0.10, 0.06, 0.035), 0.9),
-        "leaves": random_tint_material("Leaves", (0.02, 0.10, 0.025), (0.12, 0.25, 0.04), 0.8),
         "blades": grass_blade_material(),
         "rock": textured_material("Rock", (0.08, 0.075, 0.07), (0.16, 0.15, 0.13), 3.0, 12.0, 0.8, 0.4),
         "frame": make_material("ScooterOrange", (0.90, 0.22, 0.02), 0.35, inputs={"Coat Weight": 0.6}),
@@ -729,37 +715,40 @@ def build_fence(road, mats, coll):
     b.to_object("Fence", [mats["wood"], mats["wire"]], coll)
 
 
-def conifer_mesh(mats):
-    b = MeshBuilder()
-    b.cylinder(T(0, 0, 0.6), 0.18, 1.2, mat=0, segments=8, smooth_shade=False)
-    for radius, height, z in ((1.4, 2.2, 0.8), (1.1, 1.9, 1.9), (0.75, 1.6, 2.9)):
-        b.cone(T(0, 0, z), radius, height, mat=1, segments=9, smooth_shade=False)
-    return b.to_mesh("Conifer", [mats["bark"], mats["leaves"]])
+def load_tree_meshes():
+    """Meshes of the Poly Haven fir_tree_01 variants a, b and c, as {lod: [mesh, ...]}.
+    The model ships its own levels of detail: LOD1 is ~70-180k triangles, LOD2 ~30-70k."""
+    path = ROOT / "assets" / "models" / "fir_tree_01" / "fir_tree_01.blend"
+    names = {lod: [f"fir_tree_01_{v}_{lod}" for v in "abc"] for lod in ("LOD1", "LOD2")}
+    with bpy.data.libraries.load(str(path)) as (src, dst):
+        dst.objects = [n for group in names.values() for n in group]
+    loaded = {o.name: o.data for o in dst.objects}
+    for obj in dst.objects:
+        bpy.data.objects.remove(obj)
+    # Alpha-tested shadows of the twig cards cost ~50 s per frame on the Radeon 680M and look
+    # the same as opaque card shadows at the distances the trees are seen from.
+    for mat in {m for mesh in loaded.values() for m in mesh.materials if m and "twig" in m.name}:
+        mat.use_transparent_shadow = False
+    return {lod: [loaded[n] for n in group] for lod, group in names.items()}
 
 
-def broadleaf_mesh(mats):
-    b = MeshBuilder()
-    b.cylinder(T(0, 0, 0.9), 0.15, 1.8, mat=0, segments=8, smooth_shade=False)
-    b.ico(T(0, 0, 2.6) @ S(1, 1, 0.85), 1.4, mat=1)
-    b.ico(T(0.6, 0.3, 3.1), 1.0, mat=1)
-    b.ico(T(-0.5, -0.4, 2.9), 0.9, mat=1)
-    return b.to_mesh("Broadleaf", [mats["bark"], mats["leaves"]])
-
-
-def scatter_trees(road, mats, coll, rng):
-    templates = [conifer_mesh(mats), broadleaf_mesh(mats)]
+def scatter_trees(road, coll, rng, ride_x):
+    """Fir trees in clusters away from the road: full LOD1 detail near the ride, LOD2 further out."""
+    meshes = load_tree_meshes()
     placed = 0
-    while placed < 450:
+    while placed < 300:
         x, y = rng.uniform(-120, 120), rng.uniform(-120, 120)
-        if road.distance(x, y)[1] < 6.0 + rng.uniform(0, 4):
+        distance = road.distance(x, y)[1]
+        if distance < 6.0 + rng.uniform(0, 4):
             continue
         if noise.noise(Vector((x / 30.0, y / 30.0, 3.3))) < -0.05:
             continue
-        mesh = templates[0] if rng.random() < 0.55 else templates[1]
+        near = distance < 30.0 and ride_x[0] - 30.0 < x < ride_x[1] + 30.0
+        mesh = rng.choice(meshes["LOD1" if near else "LOD2"])
         obj = link(bpy.data.objects.new(f"Tree.{placed:03d}", mesh), coll,
                    location=(x, y, road.terrain_height(x, y) - 0.1))
         obj.rotation_euler.z = rng.uniform(0, 2 * math.pi)
-        obj.scale = (rng.uniform(0.7, 1.6),) * 3
+        obj.scale = (rng.uniform(0.45, 1.0),) * 3
         placed += 1
 
 
@@ -1597,7 +1586,7 @@ def main():
     build_road(road, mats, env)
     build_speed_bumps(road, mats, env)
     build_fence(road, mats, env)
-    scatter_trees(road, mats, env, rng)
+    scatter_trees(road, env, rng, ride_x)
     scatter_rocks(road, mats, env, rng, ride_x)
     build_grass(mats, env, terrain, rng)
     build_world(scene)
