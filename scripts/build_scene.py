@@ -132,18 +132,26 @@ def fbm(x, y, octaves=5, z=0.37):
     return total
 
 
+def away_from_sun(x, y):
+    """0 in the direction of the setting sun, 1 beyond SUN_GAP degrees either side of it."""
+    gap = abs(wrap_angle(math.atan2(y, x) - math.radians(SUN_AZIMUTH)))
+    return smoothstep(math.radians(SUN_GAP[0]), math.radians(SUN_GAP[1]), gap)
+
+
 def base_height(x, y):
+    """Rolling ground along the ride, rising into foothills that ring the valley. The foothills
+    stay low towards the sunset and along the road, which runs through a notch."""
     h = 12.0 * fbm(x / 35.0, y / 35.0)
-    ring = smoothstep(55.0, 125.0, math.hypot(x, y))
-    return h + ring * (10.0 + 8.0 * fbm(x / 60.0 + 5.0, y / 60.0 + 5.0, octaves=3))
+    ring = smoothstep(55.0, 125.0, math.hypot(x, y)) * smoothstep(8.0, 35.0, abs(y - centre_y(x)))
+    height = lerp(10.0, 30.0, away_from_sun(x, y))
+    return h + ring * height * (0.75 + 0.35 * fbm(x / 60.0 + 5.0, y / 60.0 + 5.0, octaves=3))
 
 
 def far_height(x, y):
     """Foothills rising away from the near terrain into an alpine range, with a low gap where
     the sun sets. ridged_multi_fractal spans about 0.15-1.9 (median 1.16)."""
     r = math.hypot(x, y)
-    gap = abs(wrap_angle(math.atan2(y, x) - math.radians(SUN_AZIMUTH)))
-    open_side = smoothstep(math.radians(SUN_GAP[0]), math.radians(SUN_GAP[1]), gap)
+    open_side = away_from_sun(x, y)
     foothills = 30.0 + 600.0 * smoothstep(250.0, 8000.0, r) * (0.3 + 0.7 * open_side) \
         * (0.6 + 0.4 * fbm(x / 2500.0, y / 2500.0, octaves=4, z=11.1))
     ridges = noise.ridged_multi_fractal(Vector((x / 6000.0, y / 6000.0, 0.5)), 1.0, 2.0, 8, 1.0, 2.0,
@@ -838,7 +846,7 @@ def scatter_trees(road, coll, rng, ride_x):
         obj = link(bpy.data.objects.new(f"Tree.{placed:03d}", mesh), coll,
                    location=(x, y, road.terrain_height(x, y) - 0.1))
         obj.rotation_euler.z = rng.uniform(0, 2 * math.pi)
-        obj.scale = (rng.uniform(0.45, 1.0),) * 3
+        obj.scale = (rng.uniform(0.35, 0.8),) * 3
         placed += 1
 
 
