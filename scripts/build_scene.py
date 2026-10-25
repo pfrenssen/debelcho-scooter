@@ -15,6 +15,7 @@ from pathlib import Path
 
 import bmesh
 import bpy
+import numpy as np
 from mathutils import Matrix, Vector, kdtree, noise
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1377,13 +1378,107 @@ def toes(b, front, side, y, z, radius, mat):
         b.ellipsoid((front + reach, side * (y + dy), z), (radius * 1.1, radius, radius * 0.85), mat, segments=12, rings=6)
 
 
+def hind_joints(s):
+    return {"hip": Vector((-0.075, s * 0.052, 0.225)), "knee": Vector((0.012, s * 0.066, 0.168)),
+            "hock": Vector((-0.088, s * 0.056, 0.13)), "ball": Vector((-0.012, s * 0.052, 0.128))}
+
+
+def front_joints(s):
+    return {"shoulder": Vector((0.07, s * 0.055, 0.455)), "elbow": Vector((0.115, s * 0.1, 0.43)),
+            "wrist": Vector((0.205, s * 0.126, 0.555)), "toes": Vector((0.243, s * 0.135, 0.569))}
+
+
+def cat_bones():
+    """Bones in the cat's modelling frame: name -> (head, tail, parent, connected)."""
+    bones = {"pelvis": (Vector((-0.075, 0, 0.20)), Vector((-0.03, 0, 0.29)), None, False),
+             "spine": (Vector((-0.03, 0, 0.29)), Vector((0.055, 0, 0.44)), "pelvis", True),
+             "neck": (Vector((0.055, 0, 0.44)), NECK.copy(), "spine", True)}
+    for s, side in ((1, "L"), (-1, "R")):
+        h, f = hind_joints(s), front_joints(s)
+        bones[f"thigh.{side}"] = (h["hip"], h["knee"], "pelvis", False)
+        bones[f"shin.{side}"] = (h["knee"], h["hock"], f"thigh.{side}", True)
+        bones[f"foot.{side}"] = (h["hock"], h["ball"] + Vector((0.02, 0, 0)), None, False)
+        bones[f"upperarm.{side}"] = (f["shoulder"], f["elbow"], "spine", False)
+        bones[f"forearm.{side}"] = (f["elbow"], f["wrist"], f"upperarm.{side}", True)
+        bones[f"paw.{side}"] = (f["wrist"], f["toes"], None, False)
+    return bones
+
+
+def build_cat_armature(coll, scooter_body):
+    """Armature in the cat's modelling frame, with its origin at CAT_PIVOT. The feet and paws have
+    no parent bone, so they stay planted on the deck and on the grips; IK on the shins and
+    forearms keeps the legs attached while the pelvis and spine move."""
+    data = bpy.data.armatures.new("CatRig")
+    rig = link(bpy.data.objects.new("CatRig", data), coll, scooter_body, CAT_PIVOT + CAT_OFFSET)
+    bones = cat_bones()
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode='EDIT')
+    for name, (head, tail, _, _) in bones.items():
+        bone = data.edit_bones.new(name)
+        bone.head, bone.tail = head - CAT_PIVOT, tail - CAT_PIVOT
+    for name, (_, _, parent, connected) in bones.items():
+        if parent:
+            data.edit_bones[name].parent = data.edit_bones[parent]
+            data.edit_bones[name].use_connect = connected
+    bpy.ops.object.mode_set(mode='OBJECT')
+    for chain, joints, end in (("shin", hind_joints, "hock"), ("forearm", front_joints, "wrist")):
+        for s, side in ((1, "L"), (-1, "R")):
+            target = make_empty(f"{chain.title()}Target.{side}", coll, rig, joints(s)[end] - CAT_PIVOT, size=0.02)
+            ik = rig.pose.bones[f"{chain}.{side}"].constraints.new('IK')
+            ik.target = target
+            ik.chain_count = 2
+    return rig
+
+
+def skin(obj, rig, smoothing=30):
+    """Weights from the distance to each bone (inverse fourth power), smoothed over the surface
+    so the influence changes gradually between bones, then an Armature modifier. Call before
+    adding particle hair so the hair follows the deformation."""
+    mesh = obj.data
+    n = len(mesh.vertices)
+    co = np.empty(n * 3)
+    mesh.vertices.foreach_get("co", co)
+    co = co.reshape(n, 3)
+    names = [b.name for b in rig.data.bones]
+    weights = np.empty((n, len(names)))
+    for k, bone in enumerate(rig.data.bones):
+        head, axis = np.array(bone.head_local), np.array(bone.tail_local - bone.head_local)
+        t = np.clip((co - head) @ axis / (axis @ axis), 0.0, 1.0)
+        distance = np.linalg.norm(co - (head + t[:, None] * axis), axis=1)
+        weights[:, k] = 1.0 / (distance + 0.004) ** 4
+    weights /= weights.sum(axis=1, keepdims=True)
+
+    edges = np.empty(len(mesh.edges) * 2, dtype=np.int64)
+    mesh.edges.foreach_get("vertices", edges)
+    a, b = edges[0::2], edges[1::2]
+    degree = np.bincount(np.concatenate((a, b)), minlength=n)[:, None]
+    for _ in range(smoothing):
+        neighbours = np.zeros_like(weights)
+        np.add.at(neighbours, a, weights[b])
+        np.add.at(neighbours, b, weights[a])
+        weights = 0.5 * weights + 0.5 * neighbours / np.maximum(degree, 1)
+
+    for k, name in enumerate(names):
+        group = obj.vertex_groups.new(name=name)
+        for index in np.nonzero(weights[:, k] > 0.01)[0]:
+            group.add([int(index)], float(weights[index, k]), 'REPLACE')
+    obj.modifiers.new("Rig", 'ARMATURE').object = rig
+
+
+def parent_to_bone(obj, rig, bone_name):
+    """Parent obj to a bone without moving it: Blender places bone children relative to the
+    bone's tail, so the parent inverse is the inverse of the rest tail matrix."""
+    bone = rig.data.bones[bone_name]
+    obj.parent = rig
+    obj.parent_type = 'BONE'
+    obj.parent_bone = bone_name
+    obj.matrix_parent_inverse = (Matrix.Translation(bone.tail_local) @ bone.matrix_local.to_3x3().to_4x4()).inverted()
+
+
 def hind_leg(b, s, mat):
     """Standing on the hind legs: thigh forward to the knee, shin back down to the hock,
     and the foot flat on the deck from the hock to the toes."""
-    hip = Vector((-0.075, s * 0.052, 0.225))
-    knee = Vector((0.012, s * 0.066, 0.168))
-    hock = Vector((-0.088, s * 0.056, 0.13))
-    ball = Vector((-0.012, s * 0.052, 0.128))
+    hip, knee, hock, ball = hind_joints(s).values()
     b.ellipsoid((-0.085, s * 0.04, 0.215), (0.06, 0.04, 0.06), mat)  # haunch
     segment(b, hip, knee, 0.03, 0.04, 0.015, mat)
     b.limb(knee, hock, 0.02, 0.013, mat)
@@ -1395,9 +1490,7 @@ def hind_leg(b, s, mat):
 def front_leg(b, s, mat):
     """Shoulder blade, upper arm out to the elbow, forearm up to the wrist, and a paw whose
     toes curl over the front of the handlebar grip."""
-    shoulder = Vector((0.07, s * 0.055, 0.455))
-    elbow = Vector((0.115, s * 0.1, 0.43))
-    wrist = Vector((0.205, s * 0.126, 0.555))
+    shoulder, elbow, wrist, _ = front_joints(s).values()
     b.ellipsoid((0.05, s * 0.058, 0.475), (0.03, 0.022, 0.048), mat, rot=R(math.radians(30), 'Y'))
     segment(b, shoulder, elbow, 0.026, 0.028, 0.01, mat)
     b.limb(elbow, wrist, 0.019, 0.014, mat)
@@ -1406,7 +1499,7 @@ def front_leg(b, s, mat):
 
 
 def build_cat(mats, coll, scooter_body):
-    cat_rig = make_empty("CatRig", coll, scooter_body, CAT_PIVOT + CAT_OFFSET)
+    cat_rig = build_cat_armature(coll, scooter_body)
     FUR = 0
 
     b = MeshBuilder(CAT_PIVOT)
@@ -1417,6 +1510,7 @@ def build_cat(mats, coll, scooter_body):
         front_leg(b, s, FUR)
     body = b.to_object("CatBody", [mats["fur"]], coll, cat_rig)
     remesh(body, 0.0035, 8)
+    skin(body, cat_rig)
     add_fur(body, mats, 5000, 0.012, (-1.0, 0.0, -0.6))
 
     c = MeshBuilder(CAT_PIVOT)
@@ -1425,7 +1519,7 @@ def build_cat(mats, coll, scooter_body):
     c.torus(Matrix.Translation(collar_c) @ align_z(neck_dir), 0.054, 0.01, 0, seg_minor=8)
     front = (Vector((1, 0, 0)) - neck_dir * neck_dir.x).normalized()
     c.ellipsoid(collar_c + front * 0.068 - neck_dir * 0.012, (0.012,) * 3, 1, segments=16, rings=8)
-    c.to_object("CatCollar", [mats["collar"], mats["gold"]], coll, cat_rig)
+    parent_to_bone(c.to_object("CatCollar", [mats["collar"], mats["gold"]], coll, cat_rig), cat_rig, "neck")
 
     tail_curve = build_tail(mats, coll, cat_rig)
     head_rig, ears, eyes = build_head(mats, coll, cat_rig)
@@ -1481,12 +1575,15 @@ def build_tail(mats, coll, cat_rig):
     bend.object = curve
     bend.deform_axis = 'POS_X'
     add_fur(tail, mats, 900, 0.0144, (0.8, 0.0, 0.0))
+    parent_to_bone(curve, cat_rig, "pelvis")
+    parent_to_bone(tail, cat_rig, "pelvis")
     return curve
 
 
 def build_head(mats, coll, cat_rig):
     head_rig = make_empty("HeadRig", coll, cat_rig, NECK - CAT_PIVOT, size=0.05)
     head_rig.scale = (1.12, 1.12, 1.12)
+    parent_to_bone(head_rig, cat_rig, "neck")
     b = MeshBuilder(NECK)
     b.ellipsoid((0.115, 0, 0.60), (0.075, 0.08, 0.068), 0, segments=32, rings=16)
     for s in (-1, 1):
@@ -1608,6 +1705,20 @@ def pose_suspension(scooter, susp, road, s, frame):
             spring.keyframe_insert(path, frame=frame)
 
 
+def pose_cat(rig, lean, drop, frame):
+    """Lower the pelvis by drop and lean the spine forward by lean (radians) about its base, both
+    in the armature frame, and key the bones' local channels."""
+    pelvis, spine = rig.pose.bones["pelvis"], rig.pose.bones["spine"]
+    rest = pelvis.bone.matrix_local
+    pelvis.matrix_basis = rest.inverted() @ T(0, 0, drop) @ rest
+    # The spine's parent moves by the same translation, so its basis is just the rotation.
+    rest, hinge = spine.bone.matrix_local, spine.bone.head_local
+    spine.matrix_basis = rest.inverted() @ T(*hinge) @ R(lean, 'Y') @ T(*-hinge) @ rest
+    for bone in (pelvis, spine):
+        bone.keyframe_insert("location", frame=frame)
+        bone.keyframe_insert("rotation_quaternion", frame=frame)
+
+
 def animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes):
     bpy.context.preferences.edit.keyframe_new_interpolation_type = 'LINEAR'
     rig, wheels = scooter.rig, scooter.wheels
@@ -1620,6 +1731,7 @@ def animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes):
     ride_x = []
     susp = Suspension()
     bump_frames = []
+    body_lean = 0.0
 
     for frame in range(1, FRAME_END + 1):
         t = (frame - 1) / FPS
@@ -1652,14 +1764,16 @@ def animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes):
         if any(abs(s + FRONT_AXLE.x - b) < v / FPS / 2 for b in road.bumps):
             bump_frames.append(frame)
 
-        # The cat absorbs the bumps in its legs: squash and stretch about its feet.
-        squash = 1.0 + min(max(susp.cat / 0.4, -0.08), 0.06)
-        cat_rig.location = CAT_PIVOT + CAT_OFFSET + Vector((0, 0, 0.003 * math.sin(2 * math.pi * 1.6 * t)))
-        cat_rig.scale = (1.0 / math.sqrt(squash), 1.0 / math.sqrt(squash), squash)
-        cat_rig.keyframe_insert("location", frame=frame)
-        cat_rig.keyframe_insert("scale", frame=frame)
-        # Cats keep their head level: counter the scooter's lean and look into the turn.
-        head_rig.rotation_euler = (lean * 0.6, 0.05 * math.sin(2 * math.pi * 0.5 * t),
+        # The cat leans into climbs and back on descents, crouches a little uphill, and absorbs
+        # the bumps by dropping its hips; IK keeps the paws on the grips and the feet planted.
+        pitch = math.atan(slope)
+        body_lean += (min(max(1.2 * pitch, -0.12), 0.35) - body_lean) * 0.08
+        drop = (0.003 * math.sin(2 * math.pi * 1.6 * t) + min(max(susp.cat * 0.5, -0.025), 0.02)
+                - 0.04 * max(pitch, 0.0))
+        pose_cat(cat_rig, body_lean, drop, frame)
+        # Cats keep their head level: counter the scooter's lean and the body's lean, and look
+        # into the turn.
+        head_rig.rotation_euler = (lean * 0.6, 0.05 * math.sin(2 * math.pi * 0.5 * t) - body_lean * 0.7,
                                    min(max(kappa * 1.5, -0.25), 0.25))
         head_rig.keyframe_insert("rotation_euler", frame=frame)
 

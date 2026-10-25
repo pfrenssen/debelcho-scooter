@@ -5,9 +5,8 @@ the shot.
 
 ## Cat
 
-- **Rig with an armature.** IK chains keep the paws on the grips and the feet planted on the
-  deck; the spine leans forward on climbs and back on descents; the hips drop over bumps; the
-  head tracks the road. Replaces the fixed pose and the scale-based squash. *(In progress.)*
+- **Secondary motion.** The rig drives the pelvis and spine only. Add ear and whisker flutter
+  in the wind, a breathing cycle, and a short head bob that lags the bumps.
 - **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
   and tail), add clumping and some flyaway strands, and use the Principled Hair BSDF for Cycles
   renders.
