@@ -63,6 +63,9 @@ TAIL_BASE = Vector((-0.13, 0.0, 0.21))
 
 SUN_ELEVATION = 4.0
 SUN_AZIMUTH = 15.0  # degrees from +X towards +Y; the ride starts heading +X, into the sunset
+HAZE_DENSITY = 0.006  # at the haze base; falls off with height
+HAZE_HEIGHT = 20.0  # metres per e-fold of the density
+DOF_FSTOP = 2.8
 CLOUD_SCALE = 1.2
 CLOUD_COVER = 0.45  # noise threshold where clouds begin; lower is more cloud
 
@@ -622,6 +625,32 @@ def scatter_ground_detail(road, mats, coll, rng, ride_x):
         rocks.ico(m, 1.0, mat=0)
         count += 1
     rocks.to_object("Rocks", [mats["rock"]], coll)
+
+
+def build_haze(coll):
+    """Aerial perspective: a box of forward-scattering volume over the terrain, thinning with
+    height. A world volume does not work in EEVEE: it is infinitely deep and blocks the sun."""
+    half, bottom, top = TERRAIN_SIZE / 2 - 5.0, -15.0, 80.0
+    b = MeshBuilder()
+    b.box((0, 0, (bottom + top) / 2), (2 * half, 2 * half, top - bottom))
+    mat = bpy.data.materials.new("Haze")
+    if mat.node_tree is None:
+        mat.use_nodes = True
+    nt = mat.node_tree
+    for node in [n for n in nt.nodes if n.type != 'OUTPUT_MATERIAL']:
+        nt.nodes.remove(node)
+    out = next(n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL')
+    volume = nt.nodes.new('ShaderNodeVolumePrincipled')
+    volume.inputs['Color'].default_value = (1.0, 0.88, 0.8, 1.0)
+    volume.inputs['Anisotropy'].default_value = 0.6
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    xyz = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(coord.outputs['Object'], xyz.inputs[0])
+    falloff = math_node(nt, 'EXPONENT', math_node(nt, 'DIVIDE', xyz.outputs['Z'], -HAZE_HEIGHT), 0.0)
+    nt.links.new(math_node(nt, 'MULTIPLY', falloff, HAZE_DENSITY), volume.inputs['Density'])
+    nt.links.new(volume.outputs['Volume'], out.inputs['Volume'])
+    haze = b.to_object("Haze", [mat], coll)
+    haze.display_type = 'BOUNDS'
 
 
 def socket(sockets, name, kind):
@@ -1230,6 +1259,8 @@ def configure_render(scene):
     scene.eevee.taa_render_samples = 64
     if hasattr(scene.eevee, "use_raytracing"):
         scene.eevee.use_raytracing = True
+    scene.eevee.volumetric_end = 300.0
+    scene.eevee.use_volumetric_shadows = True
     scene.render.resolution_x, scene.render.resolution_y = 1280, 720
     scene.render.fps = FPS
     scene.frame_start, scene.frame_end = 1, FRAME_END
@@ -1275,6 +1306,9 @@ def main():
     track.target = scooter.target
     track.track_axis = 'TRACK_NEGATIVE_Z'
     track.up_axis = 'UP_Y'
+    cam_data.dof.use_dof = True
+    cam_data.dof.focus_object = scooter.target
+    cam_data.dof.aperture_fstop = DOF_FSTOP
     scene.camera = cam
 
     ride_x = animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes)
@@ -1286,6 +1320,7 @@ def main():
     scatter_trees(road, mats, env, rng)
     scatter_ground_detail(road, mats, env, rng, ride_x)
     build_world(scene)
+    build_haze(env)
     configure_render(scene)
 
     zs = [p.z for p in road.points if ride_x[0] <= p.x <= ride_x[1]]
