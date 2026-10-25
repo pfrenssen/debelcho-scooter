@@ -42,23 +42,31 @@ GRASS_DENSITY = 160.0  # clumps per square metre at the road verge
 GRASS_CLUMPS = 6  # clump variants
 
 # Scooter local frame: +X forward, +Y left, +Z up, origin on the ground below the deck.
-WHEEL_R = 0.075
-REAR_AXLE = Vector((-0.27, 0.0, WHEEL_R))
-FRONT_AXLE = Vector((0.29, 0.0, WHEEL_R))
-DECK_TOP = 0.117
-FORK_Y = 0.036
-FORK_DIR = Vector((-0.015, 0.0, 0.095))  # front axle to fork crown
+# Modelled on the Segway Ninebot Max G2 (1.26 m tall, 20 cm deck, 10-inch tyres), scaled to the
+# cat: SCOOTER_SCALE of the real size puts the handlebar where the cat's paws are.
+SCOOTER_SCALE = 0.443
+WHEEL_R = 0.127 * SCOOTER_SCALE
+REAR_AXLE = Vector((-0.15, 0.0, WHEEL_R))
+FRONT_AXLE = Vector((0.33, 0.0, WHEEL_R))
+DECK_TOP = 0.20 * SCOOTER_SCALE
+DECK_X = (-0.092, 0.22)
+FORK_Y = 0.025
+FORK_DIR = Vector((-0.027, 0.0, 0.13))  # front axle to fork crown, raked like the stem
 SLIDER_TOP = 0.6  # fraction of FORK_DIR covered by the lower fork sliders
-SWINGARM_PIVOT = Vector((-0.20, 0.0, 0.092))
-SHOCK_Y = 0.045
-SHOCK_TOP = Vector((-0.25, 0.0, 0.158))
+SWINGARM_PIVOT = Vector((-0.085, 0.0, 0.068))
+SHOCK_Y = 0.032
+SHOCK_TOP = Vector((-0.12, 0.0, 0.13))
+# The cat was modelled standing on a deck 0.117 m high with its paws on a bar at 0.56 m.
+CAT_OFFSET = Vector((0.0, 0.0, DECK_TOP - 0.117))
+BAR = Vector((0.23, 0.0, 0.56)) + CAT_OFFSET
+BAR_HALF_WIDTH = 0.14
 LANE_OFFSET = -0.45  # metres left of the centre line (negative: right lane)
 BASE_SPEED = 4.5  # m/s
 RIDE_START_X = -22.0
 
 # Speed bumps, as distances along the road from the ride start (m).
 BUMPS = [8.0, 27.0, 46.0]
-BUMP_HEIGHT = 0.05
+BUMP_HEIGHT = 0.04
 BUMP_LENGTH = 0.35
 ROAD_ROUGHNESS = 0.003
 
@@ -67,7 +75,7 @@ SPRING_HZ = 3.0
 SPRING_DAMPING = 0.25  # damping ratio
 SUBSTEPS = 10
 
-CAT_PIVOT = Vector((-0.04, 0.0, DECK_TOP))
+CAT_PIVOT = Vector((-0.04, 0.0, 0.117))  # in the cat's modelling frame; see CAT_OFFSET
 NECK = Vector((0.09, 0.0, 0.52))
 TAIL_BASE = Vector((-0.13, 0.0, 0.21))
 
@@ -357,6 +365,30 @@ class MeshBuilder:
                 self.bm.faces.new((r0[k], r0[(k + 1) % ring], r1[(k + 1) % ring], r1[k]))
         self._finish([v for r in rings for v in r], mat, True)
 
+    def arc_band(self, centre, radius, width, thickness, a0, a1, mat=0, steps=20):
+        """Curved strip around the Y axis through centre, from angle a0 to a1 (0 = +X, 90 = +Z):
+        a mudguard."""
+        rings = []
+        for i in range(steps + 1):
+            a = math.radians(lerp(a0, a1, i / steps))
+            out = Vector((math.cos(a), 0.0, math.sin(a)))
+            rings.append([self.bm.verts.new(self.to_local @ (Vector(centre) + out * r + Vector((0, y, 0))))
+                          for r, y in ((radius, -width / 2), (radius, width / 2),
+                                       (radius + thickness, width / 2), (radius + thickness, -width / 2))])
+        for r0, r1 in zip(rings, rings[1:]):
+            for k in range(4):
+                self.bm.faces.new((r0[k], r0[(k + 1) % 4], r1[(k + 1) % 4], r1[k]))
+        self.bm.faces.new(rings[0])
+        self.bm.faces.new(list(reversed(rings[-1])))
+        self._finish([v for r in rings for v in r], mat, True)
+
+    def bellows(self, radius, length, folds, mat=0):
+        """Rubber gaiter along +Z from the origin: overlapping rings over a core tube."""
+        pitch = length / folds
+        for k in range(folds):
+            self.torus(T(0, 0, (k + 0.5) * pitch), radius, pitch * 0.55, mat, seg_major=16, seg_minor=8)
+        self.cylinder(T(0, 0, length / 2), radius * 0.9, length, mat, segments=16)
+
     def to_mesh(self, name, materials):
         mesh = bpy.data.meshes.new(name)
         self.bm.normal_update()
@@ -446,7 +478,10 @@ def build_materials():
         "wire": make_material("FenceWire", (0.4, 0.4, 0.42), 0.4, metallic=1.0),
         "blades": grass_blade_material(),
         "rock": textured_material("Rock", (0.08, 0.075, 0.07), (0.16, 0.15, 0.13), 3.0, 12.0, 0.8, 0.4),
-        "frame": make_material("ScooterOrange", (0.90, 0.22, 0.02), 0.35, inputs={"Coat Weight": 0.6}),
+        "frame": make_material("ScooterPaint", (0.045, 0.047, 0.05), 0.35, metallic=0.6, inputs={"Coat Weight": 0.5}),
+        "plastic": make_material("BlackPlastic", (0.02, 0.02, 0.021), 0.5),
+        "amber": make_material("Indicator", (0.9, 0.45, 0.02), 0.2, emission=(1.0, 0.45, 0.02), strength=0.3),
+        "reflector": make_material("Reflector", (0.9, 0.35, 0.02), 0.15),
         "rubber": make_material("Rubber", (0.015, 0.015, 0.015), 0.85),
         "alu": make_material("Aluminium", (0.65, 0.66, 0.68), 0.3, metallic=1.0),
         "headlight": make_material("Headlight", (1.0, 0.95, 0.85), 0.2, emission=(1.0, 0.95, 0.85), strength=30.0),
@@ -462,7 +497,7 @@ def build_materials():
         "collar": make_material("Collar", (0.7, 0.03, 0.05), 0.5),
         "gold": make_material("Bell", (1.0, 0.75, 0.3), 0.2, metallic=1.0),
         "bump_yellow": make_material("BumpYellow", (0.9, 0.65, 0.02), 0.6),
-        "spring": make_material("Spring", (0.9, 0.75, 0.05), 0.3, metallic=1.0),
+        "spring": make_material("Spring", (0.12, 0.12, 0.13), 0.3, metallic=1.0),
         "strands": strand_material(),
     }
     return m
@@ -1128,85 +1163,146 @@ def build_scooter_lights(coll, body):
             obj.rotation_quaternion = Vector(direction).to_track_quat('-Z', 'Y')
         return obj
 
-    lamp("HeadlightBeam", 'SPOT', (0.276, 0, 0.47), 6.0, (1.0, 0.92, 0.8), (1.0, 0.0, -0.18),
-         spot_size=math.radians(55), spot_blend=0.6, shadow_soft_size=0.01)
-    lamp("TailLight", 'POINT', (-0.36, 0, 0.16), 0.15, (1.0, 0.05, 0.03), shadow_soft_size=0.005)
-    lamp("Underglow", 'AREA', (0, 0, 0.065), 0.6, (0.1, 0.8, 1.0), shape='RECTANGLE', size=0.4, size_y=0.12)
+    lamp("HeadlightBeam", 'SPOT', BAR + Vector((0.031, 0, -0.004)), 6.0, (1.0, 0.92, 0.8), (1.0, 0.0, -0.25),
+         spot_size=math.radians(55), spot_blend=0.6, shadow_soft_size=0.005)
+    lamp("TailLight", 'POINT', (-0.228, 0, 0.083), 0.15, (1.0, 0.05, 0.03), shadow_soft_size=0.005)
+    lamp("Underglow", 'AREA', ((DECK_X[0] + DECK_X[1]) / 2, 0, DECK_TOP - 0.036), 0.5, (0.1, 0.8, 1.0),
+         shape='RECTANGLE', size=0.26, size_y=0.06)
+
+
+def build_wheel(name, axle, carrier, coll, materials, hub_radius, hub_width, hub_mat):
+    """10-inch pneumatic tyre with tread blocks on a five double-spoke rim. The front hub holds the
+    drum brake, the rear hub the motor."""
+    RUBBER, SPRING = 1, 6
+    w = MeshBuilder(axle)
+    across = Matrix.Translation(axle) @ R(math.pi / 2, 'X')
+    w.torus(across @ S(1, 1, 1.1), WHEEL_R - 0.013, 0.013, RUBBER, seg_major=48, seg_minor=12)
+    for k in range(44):
+        a = 2 * math.pi * k / 44
+        out = Vector((math.cos(a), 0, math.sin(a)))
+        w.box(axle + out * (WHEEL_R - 0.0012) + Vector((0, 0.005 * (-1) ** k, 0)), (0.004, 0.02, 0.003), RUBBER,
+              rot=R(-(a + math.pi / 2), 'Y'))
+    w.torus(across, 0.031, 0.0035, SPRING, seg_major=40, seg_minor=8)
+    for k in range(5):
+        a = 2 * math.pi * k / 5
+        out = Vector((math.cos(a), 0, math.sin(a)))
+        for y in (-0.004, 0.004):
+            w.box(axle + out * 0.022 + Vector((0, y, 0)), (0.02, 0.004, 0.005), SPRING, rot=R(-a, 'Y'))
+    w.cylinder(across, hub_radius, hub_width, hub_mat, segments=24)
+    w.cylinder(across, 0.004, hub_width + 0.012, 2, segments=12)
+    return w.to_object(name, materials, coll, carrier)
+
+
+def build_brake_cable(mats, coll, body, crown, stem):
+    """Cable from the left brake lever, looping in front of the stem, down to the front drum."""
+    cu = bpy.data.curves.new("BrakeCable", 'CURVE')
+    cu.dimensions = '3D'
+    cu.bevel_depth = 0.0016
+    cu.bevel_resolution = 2
+    spline = cu.splines.new('NURBS')
+    points = [BAR + Vector((0.016, 0.075, 0.0)), BAR + Vector((0.05, 0.05, -0.04)),
+              crown + stem * 0.16 + Vector((0.02, 0.02, 0)), crown + Vector((0.016, 0.02, -0.005)),
+              FRONT_AXLE + FORK_DIR * 0.62 + Vector((0.008, FORK_Y + 0.006, 0))]
+    spline.points.add(len(points) - 1)
+    for point, co in zip(spline.points, points):
+        point.co = (*co, 1.0)
+    spline.order_u = 3
+    spline.use_endpoint_u = True
+    cu.materials.append(mats["plastic"])
+    link(bpy.data.objects.new("BrakeCable", cu), coll, body)
 
 
 def build_scooter(mats, coll):
     rig = make_empty("ScooterRig", coll, size=0.3)
     rig.rotation_mode = 'QUATERNION'
     body = make_empty("ScooterBody", coll, rig, size=0.2)
-    materials = [mats[k] for k in ("frame", "rubber", "alu", "headlight", "brakelight", "screen", "spring", "underglow")]
-    FRAME, RUBBER, ALU, HEAD, BRAKE, SCREEN, SPRING, GLOW = range(8)
+    materials = [mats[k] for k in ("frame", "rubber", "alu", "headlight", "brakelight", "screen", "spring",
+                                   "underglow", "plastic", "amber", "reflector")]
+    FRAME, RUBBER, ALU, HEAD, BRAKE, SCREEN, SPRING, GLOW, PLASTIC, AMBER, REFLECTOR = range(11)
     crown = FRONT_AXLE + FORK_DIR
+    stem = (BAR - crown).normalized()
+    deck_mid, deck_len = (DECK_X[0] + DECK_X[1]) / 2, DECK_X[1] - DECK_X[0]
 
     b = MeshBuilder()
-    b.box((0, 0, 0.10), (0.46, 0.13, 0.03), FRAME)
-    b.box((0, 0, DECK_TOP - 0.0015), (0.42, 0.11, 0.003), RUBBER)
-    b.box((0, 0, 0.078), (0.36, 0.10, 0.02), RUBBER)
-    b.box((-0.205, 0, 0.085), (0.03, 0.09, 0.03), ALU)
-    for y in (-0.064, 0.064):
-        b.box((0, y, 0.086), (0.40, 0.004, 0.005), GLOW)
+    # Deck: a slab with rounded sides, a ribbed grip mat, the battery cover underneath, LED strips.
+    b.box((deck_mid, 0, DECK_TOP - 0.015), (deck_len, 0.05, 0.03), FRAME)
+    for y in (-0.025, 0.025):
+        b.rod((DECK_X[0], y, DECK_TOP - 0.015), (DECK_X[1], y, DECK_TOP - 0.015), 0.0148, FRAME, segments=16)
+    b.box((deck_mid, 0, DECK_TOP + 0.0005), (deck_len - 0.02, 0.066, 0.002), RUBBER)
+    for k in range(14):
+        b.box((DECK_X[0] + 0.02 + k * (deck_len - 0.04) / 13, 0, DECK_TOP + 0.0018), (0.004, 0.058, 0.0012), RUBBER)
+    b.box((deck_mid, 0, DECK_TOP - 0.032), (deck_len - 0.04, 0.055, 0.008), PLASTIC)
+    for y in (-0.04, 0.04):
+        b.box((deck_mid, y, DECK_TOP - 0.026), (deck_len - 0.04, 0.003, 0.004), GLOW)
+    # Neck up to the steering head, with the fork crown and the upper fork tubes.
+    b.limb((DECK_X[1] - 0.02, 0, DECK_TOP - 0.012), crown - Vector((0, 0, 0.012)), 0.018, mat=FRAME)
+    b.box(crown, (0.024, 2 * FORK_Y + 0.018, 0.012), FRAME)
     for y in (-FORK_Y, FORK_Y):
-        b.rod(FRONT_AXLE + FORK_DIR * 0.2 + Vector((0, y, 0)), crown + Vector((0, y, 0)), 0.007, ALU)
-    b.rod((-0.22, 0, 0.11), (-0.25, 0, 0.165), 0.008, ALU)
-    b.box((-0.27, 0, 0.165), (0.16, 0.11, 0.008), FRAME)
-    b.box((-0.352, 0, 0.16), (0.006, 0.03, 0.01), BRAKE)
-    b.limb((0.21, 0, 0.10), (0.27, 0, 0.165), 0.02, mat=FRAME)
-    b.box(crown + Vector((0, 0, 0.002)), (0.03, 2 * FORK_Y + 0.03, 0.015), ALU)
-    b.rod(crown, (0.23, 0, 0.56), 0.017, ALU, segments=16)
-    b.rod((0.23, -0.16, 0.56), (0.23, 0.16, 0.56), 0.010, ALU)
-    for sign in (-1, 1):
-        b.rod((0.23, sign * 0.105, 0.56), (0.23, sign * 0.165, 0.56), 0.0145, RUBBER)
-    b.box((0.235, 0, 0.572), (0.03, 0.05, 0.012), RUBBER)
-    b.box((0.236, 0, 0.5785), (0.024, 0.04, 0.002), SCREEN)
-    b.cylinder(T(0.262, 0, 0.47) @ R(math.pi / 2, 'Y'), 0.018, 0.02, ALU, segments=20)
-    b.cylinder(T(0.2725, 0, 0.47) @ R(math.pi / 2, 'Y'), 0.014, 0.003, HEAD, segments=20)
+        b.rod(FRONT_AXLE + FORK_DIR * 0.2 + Vector((0, y, 0)), crown + Vector((0, y, 0)), 0.0045, ALU)
+    # Stem with the folding joint and its lever.
+    b.rod(crown, BAR - stem * 0.012, 0.0115, FRAME, segments=20)
+    hinge = Matrix.Translation(crown + stem * 0.035) @ align_z(stem)
+    b.cylinder(hinge, 0.017, 0.035, FRAME, segments=20)
+    b.box(crown + stem * 0.035 + Vector((0, -0.019, 0)), (0.006, 0.005, 0.034), PLASTIC, rot=align_z(stem))
+    # Handlebar: dashboard with display, headlight, grips, indicators, brake lever, thumb throttle.
+    b.rod(BAR + Vector((0, -BAR_HALF_WIDTH, 0)), BAR + Vector((0, BAR_HALF_WIDTH, 0)), 0.0055, FRAME)
+    b.box(BAR + Vector((0.006, 0, 0.006)), (0.036, 0.055, 0.02), PLASTIC)
+    b.box(BAR + Vector((0.0, 0, 0.0165)), (0.02, 0.026, 0.001), SCREEN, rot=R(math.radians(-20), 'Y'))
+    b.cylinder(T(*(BAR + Vector((0.025, 0, -0.004)))) @ R(math.pi / 2, 'Y'), 0.009, 0.01, PLASTIC, segments=20)
+    b.cylinder(T(*(BAR + Vector((0.0305, 0, -0.004)))) @ R(math.pi / 2, 'Y'), 0.0075, 0.002, HEAD, segments=20)
+    for s in (-1, 1):
+        b.rod(BAR + Vector((0, s * 0.09, 0)), BAR + Vector((0, s * BAR_HALF_WIDTH, 0)), 0.0085, RUBBER)
+        b.rod(BAR + Vector((0, s * BAR_HALF_WIDTH, 0)), BAR + Vector((0, s * (BAR_HALF_WIDTH + 0.008), 0)), 0.0088, AMBER)
+    b.box(BAR + Vector((0.012, 0.075, 0.004)), (0.012, 0.01, 0.01), PLASTIC)
+    b.box(BAR + Vector((0.022, 0.105, -0.002)), (0.004, 0.05, 0.004), ALU)
+    b.box(BAR + Vector((0.004, -0.08, 0.012)), (0.012, 0.008, 0.012), PLASTIC)
+    # Rear: struts from the deck to the shock mounts, the mudguard with the tail light, kickstand.
+    for s in (-1, 1):
+        b.rod((DECK_X[0] + 0.005, s * 0.028, DECK_TOP - 0.01), SHOCK_TOP + Vector((0, s * 0.028, -0.004)), 0.004, FRAME)
+        b.box(SHOCK_TOP + Vector((0, s * 0.03, 0)), (0.012, 0.016, 0.01), FRAME)
+    b.arc_band(REAR_AXLE, WHEEL_R + 0.015, 0.044, 0.0025, 55, 185, FRAME)
+    b.box((-0.226, 0, 0.083), (0.004, 0.026, 0.009), BRAKE)
+    b.rod((0.02, 0.04, DECK_TOP - 0.03), (-0.05, 0.05, DECK_TOP - 0.045), 0.0035, FRAME)
     b.to_object("ScooterFrame", materials, coll, body)
+    build_brake_cable(mats, coll, body, crown, stem)
 
     front = make_empty("FrontSuspension", coll, rig, FRONT_AXLE, size=0.05)
     rear = make_empty("RearSuspension", coll, rig, REAR_AXLE, size=0.05)
-    wheels = []
-    for name, axle, carrier in (("WheelFront", FRONT_AXLE, front), ("WheelRear", REAR_AXLE, rear)):
-        w = MeshBuilder(axle)
-        axis = Matrix.Translation(axle) @ R(math.pi / 2, 'X')
-        w.torus(axis, WHEEL_R - 0.022, 0.022, RUBBER)
-        w.cylinder(axis, 0.034, 0.03, ALU, segments=24)
-        for k in range(5):
-            for y in (-0.016, 0.016):
-                w.box(axle + Vector((0, y, 0)), (0.05, 0.004, 0.008), FRAME, rot=R(k * 2 * math.pi / 5, 'Y') @ T(0.022, 0, 0))
-        wheels.append(w.to_object(name, materials, coll, carrier))
+    wheels = [build_wheel("WheelFront", FRONT_AXLE, front, coll, materials, 0.016, 0.024, ALU),
+              build_wheel("WheelRear", REAR_AXLE, rear, coll, materials, 0.024, 0.03, PLASTIC)]
 
-    sliders = MeshBuilder(FRONT_AXLE)
-    for y in (-FORK_Y, FORK_Y):
-        offset = Vector((0, y, 0))
-        sliders.rod(FRONT_AXLE + offset, FRONT_AXLE + FORK_DIR * SLIDER_TOP + offset, 0.011, ALU)
-    sliders.to_object("ForkSliders", materials, coll, front)
+    lower = MeshBuilder(FRONT_AXLE)
+    for s in (-1, 1):
+        offset = Vector((0, s * FORK_Y, 0))
+        lower.rod(FRONT_AXLE + offset, FRONT_AXLE + FORK_DIR * SLIDER_TOP + offset, 0.0068, PLASTIC)
+        lower.box(FRONT_AXLE + FORK_DIR * 0.35 + Vector((0, s * (FORK_Y + 0.0075), 0)), (0.012, 0.002, 0.006), REFLECTOR)
+    lower.arc_band(FRONT_AXLE, WHEEL_R + 0.007, 0.034, 0.002, 25, 150, PLASTIC)
+    lower.to_object("ForkLower", materials, coll, front)
 
     a = MeshBuilder(SWINGARM_PIVOT)
-    for y in (-0.035, 0.035):
-        a.rod(SWINGARM_PIVOT + Vector((0, y, 0)), REAR_AXLE + Vector((0, y, 0)), 0.008, ALU)
+    for s in (-1, 1):
+        a.rod(SWINGARM_PIVOT + Vector((0, s * 0.025, 0)), REAR_AXLE + Vector((0, s * 0.025, 0)), 0.005, FRAME)
     arm = a.to_object("RearArm", materials, coll, body, SWINGARM_PIVOT)
     arm.rotation_mode = 'QUATERNION'
 
+    # Front: rubber gaiters over the hydraulic fork. Rear: coil-over shocks beside the wheel.
     springs = []
-    names = ("FrontSpringL", "FrontSpringR", "RearShockL", "RearShockR")
+    names = ("FrontGaiterL", "FrontGaiterR", "RearShockL", "RearShockR")
     for i, (bottom, top) in enumerate(spring_ends(0.0, 0.0, 0.0, 0.0)):
         length = (top - bottom).length
         s = MeshBuilder()
         if i < 2:
-            s.coil(0.0115, 0.0022, length, 4, SPRING)
+            s.bellows(0.0068, length, 6, RUBBER)
         else:
-            s.coil(0.009, 0.0022, length, 6, SPRING)
+            s.coil(0.0075, 0.0015, length, 7, SPRING)
+            s.cylinder(T(0, 0, length / 2), 0.0035, length, ALU, segments=12)
         spring = s.to_object(names[i], materials, coll, rig, bottom)
         spring.rotation_mode = 'QUATERNION'
         spring["rest_length"] = length
         springs.append(spring)
 
     build_scooter_lights(coll, body)
-    target = make_empty("CameraTarget", coll, rig, (0.03, 0.0, 0.36))
+    target = make_empty("CameraTarget", coll, rig, (0.03, 0.0, 0.33))
     return Scooter(rig, body, front, rear, wheels, arm, springs, target)
 
 
@@ -1310,7 +1406,7 @@ def front_leg(b, s, mat):
 
 
 def build_cat(mats, coll, scooter_body):
-    cat_rig = make_empty("CatRig", coll, scooter_body, CAT_PIVOT)
+    cat_rig = make_empty("CatRig", coll, scooter_body, CAT_PIVOT + CAT_OFFSET)
     FUR = 0
 
     b = MeshBuilder(CAT_PIVOT)
@@ -1558,7 +1654,7 @@ def animate(scene, road, scooter, cam, cat_rig, head_rig, tail, ears, eyes):
 
         # The cat absorbs the bumps in its legs: squash and stretch about its feet.
         squash = 1.0 + min(max(susp.cat / 0.4, -0.08), 0.06)
-        cat_rig.location = CAT_PIVOT + Vector((0, 0, 0.003 * math.sin(2 * math.pi * 1.6 * t)))
+        cat_rig.location = CAT_PIVOT + CAT_OFFSET + Vector((0, 0, 0.003 * math.sin(2 * math.pi * 1.6 * t)))
         cat_rig.scale = (1.0 / math.sqrt(squash), 1.0 / math.sqrt(squash), squash)
         cat_rig.keyframe_insert("location", frame=frame)
         cat_rig.keyframe_insert("scale", frame=frame)
