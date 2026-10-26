@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Quick Workbench wireframe render of the animation, to check motion.
 
 Usage:
