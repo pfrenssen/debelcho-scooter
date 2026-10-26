@@ -91,6 +91,9 @@ SUBSTEPS = 10
 
 CAT_PIVOT = Vector((-0.04, 0.0, 0.117))  # in the cat's modelling frame; see CAT_OFFSET
 NECK = Vector((0.09, 0.0, 0.52))
+EYE_CENTRE = Vector((0.166, 0.031, 0.613))  # left eye; the right one mirrors it
+EYE_RADII = (0.013, 0.0155, 0.0105)  # depth, width, height in the eye's own frame
+NOSE_CENTRE = Vector((0.192, 0.0, 0.586))
 TAIL_BASE = Vector((-0.13, 0.0, 0.21))
 
 SUN_ELEVATION = 4.0
@@ -503,11 +506,10 @@ def build_materials():
         "underglow": make_material("Underglow", (0.1, 0.8, 1.0), 0.3, emission=(0.1, 0.8, 1.0), strength=12.0),
         "screen": make_material("Display", (0.05, 0.4, 0.6), 0.2, emission=(0.1, 0.6, 1.0), strength=2.0),
         "fur": make_material("BlackFur", (0.008, 0.008, 0.009), 0.9),  # skin under the fur strands
-        "eye": make_material("CatEye", (0.75, 0.62, 0.04), 0.05, emission=(0.75, 0.62, 0.04), strength=0.4),
-        "pupil": make_material("Pupil", (0.0, 0.0, 0.0), 0.05),
-        "nose": make_material("CatNose", (0.10, 0.04, 0.05), 0.4),
-        "inner_ear": make_material("InnerEar", (0.12, 0.05, 0.06), 0.6),
-        "whisker": make_material("Whisker", (0.75, 0.75, 0.72), 0.4),
+        "eye": eye_material(),
+        "nose": make_material("CatNose", (0.03, 0.028, 0.03), 0.5),
+        "inner_ear": make_material("InnerEar", (0.10, 0.05, 0.05), 0.55),
+        "whisker": make_material("Whisker", (0.8, 0.8, 0.77), 0.35),
         "kerchief": kerchief_material(),
         "bump_yellow": make_material("BumpYellow", (0.9, 0.65, 0.02), 0.6),
         "spring": make_material("Spring", (0.12, 0.12, 0.13), 0.3, metallic=1.0),
@@ -690,6 +692,44 @@ def grass_blade_material():
     return mat
 
 
+def eye_material():
+    """Pale green-gold iris, golden round the pupil and with a dark rim, and a vertical slit
+    pupil, drawn in the eye object's own frame (+X out of the eye, +Z up), under a glossy
+    cornea. A little emission keeps the eyes catching the light in the dusk."""
+    mat = make_material("CatEye", (0.45, 0.52, 0.25), 0.05, inputs={"Coat Weight": 1.0, "Coat Roughness": 0.03})
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    local = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(coord.outputs['Object'], local.inputs[0])
+    y, z = local.outputs['Y'], local.outputs['Z']
+    _, width, height = EYE_RADII
+
+    scaled = nt.nodes.new('ShaderNodeCombineXYZ')
+    nt.links.new(math_node(nt, 'DIVIDE', y, width), scaled.inputs['Y'])
+    nt.links.new(math_node(nt, 'DIVIDE', z, height), scaled.inputs['Z'])
+    radius = nt.nodes.new('ShaderNodeVectorMath')
+    radius.operation = 'LENGTH'
+    nt.links.new(scaled.outputs['Vector'], radius.inputs[0])
+    r = radius.outputs['Value']
+    fibres = nt.nodes.new('ShaderNodeTexNoise')
+    fibres.inputs['Scale'].default_value = 900.0
+    fibres.inputs['Detail'].default_value = 3.0
+    nt.links.new(coord.outputs['Object'], fibres.inputs['Vector'])
+    iris = mix_colour(nt, smooth_range(nt, r, 0.25, 0.7), (0.62, 0.55, 0.18), (0.42, 0.52, 0.25))
+    iris = mix_colour(nt, smooth_range(nt, r, 0.8, 0.98), iris, (0.1, 0.12, 0.05))
+    iris = mix_colour(nt, 1.0, iris, mix_colour(nt, fibres.outputs['Fac'], (0.75, 0.75, 0.75), (1.2, 1.2, 1.2)), 'MULTIPLY')
+
+    # The slit is 1.6 mm wide at the middle and closes towards the top and bottom.
+    taper = math_node(nt, 'SUBTRACT', 1.0, math_node(nt, 'POWER', math_node(nt, 'DIVIDE', z, height * 1.05), 2.0))
+    slit = math_node(nt, 'LESS_THAN', math_node(nt, 'ABSOLUTE', y, 0.0), math_node(nt, 'MULTIPLY', taper, 0.0008))
+    colour = mix_colour(nt, slit, iris, (0.0, 0.0, 0.0))
+    nt.links.new(colour, bsdf.inputs['Base Color'])
+    nt.links.new(colour, bsdf.inputs['Emission Color'])
+    bsdf.inputs['Emission Strength'].default_value = 0.25
+    return mat
+
+
 STITCH = 0.0015  # size of one cross stitch of the handkerchief embroidery
 
 
@@ -798,8 +838,8 @@ def kerchief_material():
 
 
 def strand_material():
-    """Black fur strands that turn slightly grey towards the tips."""
-    mat = make_material("FurStrands", (0.006, 0.006, 0.007), 0.6)
+    """Glossy black fur strands that turn slightly grey towards the tips."""
+    mat = make_material("FurStrands", (0.006, 0.006, 0.007), 0.4)
     nt = mat.node_tree
     info = nt.nodes.new('ShaderNodeHairInfo')
     ramp = nt.nodes.new('ShaderNodeValToRGB')
@@ -1916,52 +1956,79 @@ def build_head(mats, coll, cat_rig):
     head_rig = make_empty("HeadRig", coll, cat_rig, NECK - CAT_PIVOT, size=0.05)
     head_rig.scale = (1.12, 1.12, 1.12)
     parent_to_bone(head_rig, cat_rig, "neck")
+    # A wedge-shaped head, after a photo of the real cat: a skull with full cheeks
+    # narrowing to a short muzzle, a nose bridge, and brow ridges that hood the top of the eyes.
     b = MeshBuilder(NECK)
-    b.ellipsoid((0.115, 0, 0.60), (0.075, 0.08, 0.068), 0, segments=32, rings=16)
+    b.ellipsoid((0.112, 0, 0.605), (0.07, 0.074, 0.062), 0, segments=32, rings=16)
+    b.ellipsoid((0.16, 0, 0.598), (0.03, 0.02, 0.028), 0)  # nose bridge
+    b.ellipsoid((0.163, 0, 0.577), (0.034, 0.032, 0.025), 0)  # muzzle
+    b.ellipsoid((0.164, 0, 0.562), (0.019, 0.017, 0.01), 0)  # chin, clear of the handlebar
     for s in (-1, 1):
-        b.ellipsoid((0.168, s * 0.022, 0.582), (0.022, 0.028, 0.024), 0)
-    b.ellipsoid((0.165, 0, 0.568), (0.02, 0.022, 0.014), 0)
+        b.ellipsoid((0.125, s * 0.038, 0.585), (0.048, 0.04, 0.038), 0)  # cheek
+        b.ellipsoid((0.178, s * 0.014, 0.569), (0.018, 0.017, 0.015), 0)  # whisker pad
+        b.ellipsoid((0.166, s * 0.031, 0.627), (0.014, 0.018, 0.007), 0, rot=R(s * 0.2, 'X'))  # brow
     head = b.to_object("CatHead", [mats["fur"]], coll, head_rig)
     remesh(head, 0.003, 6)
-    # No fur over the eyes and the nose.
-    bare = [(Vector((0.172, s * 0.032, 0.617)), 0.022, 0.032) for s in (-1, 1)]
-    bare.append((Vector((0.193, 0, 0.596)), 0.014, 0.024))
+    # No fur on the eyes and the nose leather.
+    bare = [(EYE_CENTRE * Vector((1, s, 1)), 0.016, 0.022) for s in (-1, 1)]
+    bare.append((NOSE_CENTRE, 0.009, 0.015))
     group = head.vertex_groups.new(name="FurDensity")
     for v in head.data.vertices:
         p = v.co + NECK
         group.add([v.index], min(smoothstep(r0, r1, (p - c).length) for c, r0, r1 in bare), 'REPLACE')
-    add_fur(head, mats, 2500, 0.0072, (-1.2, 0.0, 0.0), density_group=group.name)
+    add_fur(head, mats, 3500, 0.006, (-1.2, 0.0, 0.0), density_group=group.name)
 
+    # Nose leather: a rounded triangle, wide at the top.
     f = MeshBuilder(NECK)
-    f.ellipsoid((0.193, 0, 0.596), (0.007, 0.011, 0.007), 0)
+    f.ellipsoid(NOSE_CENTRE, (0.005, 0.008, 0.0055), 0)
+    for v in f.bm.verts:
+        below = min(0.0, v.co.z + NECK.z - NOSE_CENTRE.z) / 0.0055
+        v.co.y *= 1.0 + 0.6 * below
     f.to_object("CatFace", [mats["nose"]], coll, head_rig)
 
+    # Long, fine whiskers fanning out of the whisker pads, tapering and drooping to the tips.
     whiskers = []
     for s in (-1, 1):
-        root = Vector((0.183, s * 0.028, 0.585))
+        root = Vector((0.185, s * 0.024, 0.568))
         w = MeshBuilder(root)
-        for end in ((0.205, 0.115, 0.598), (0.207, 0.118, 0.583), (0.2, 0.11, 0.568)):
-            w.rod(root, (end[0], s * end[1], end[2]), 0.0012, 0, segments=4)
+        for k, (x, z, rise, length) in enumerate(((0.188, 0.574, 0.15, 0.105), (0.181, 0.575, 0.08, 0.115),
+                                                  (0.188, 0.568, 0.02, 0.12), (0.181, 0.569, -0.04, 0.118),
+                                                  (0.188, 0.562, -0.1, 0.11), (0.181, 0.563, -0.16, 0.1),
+                                                  (0.186, 0.557, -0.22, 0.09))):
+            start = Vector((x, s * (0.022 + 0.6 * (0.19 - x)), z))
+            direction = Vector((0.3, s, rise)).normalized()
+            points = [start + direction * length * t + Vector((-0.25, 0, -0.18)) * length * t * t
+                      for t in (0.0, 0.33, 0.66, 1.0)]
+            for (p0, r0), (p1, r1) in zip(zip(points, (0.0005, 0.00037, 0.00024, 0.0001)),
+                                          zip(points[1:], (0.00037, 0.00024, 0.0001))):
+                d = p1 - p0
+                w.cylinder(Matrix.Translation((p0 + p1) / 2) @ align_z(d), r0, d.length, 0, segments=5, radius2=r1)
         whiskers.append(w.to_object("WhiskersL" if s > 0 else "WhiskersR", [mats["whisker"]], coll, head_rig,
                                     root - NECK))
 
+    # Large upright ears, set high and wide at the base.
     ears = []
     for s in (-1, 1):
-        base = Vector((0.10, s * 0.048, 0.648))
+        base = Vector((0.098, s * 0.05, 0.645))
         e = MeshBuilder(base)
-        e.cone(Matrix.Translation(base) @ S(0.55, 1, 1), 0.032, 0.06, 0)
-        e.cone(Matrix.Translation(base + Vector((0.009, 0, 0.004))) @ S(0.35, 1, 1), 0.022, 0.044, 1)
+        e.cone(Matrix.Translation(base) @ S(0.5, 1, 1), 0.038, 0.072, 0)
+        # The inner ear lies along the sloping front face of the ear, a little proud of it.
+        e.cone(Matrix.Translation(base + Vector((0.0155, 0, 0.006))) @ R(-0.26, 'Y') @ S(0.15, 1, 1), 0.027, 0.056, 1)
         ear = e.to_object("EarL" if s > 0 else "EarR", [mats["fur"], mats["inner_ear"]], coll, head_rig, base - NECK)
-        ear.rotation_euler = (-s * 0.35, -0.15, 0.0)
+        ear.rotation_euler = (-s * 0.3, -0.12, s * 0.2)
         ears.append(ear)
 
+    # Almond eyes: ellipsoids set into the head under the brows, turned a little outwards and
+    # with the outer corner up. The object frame is the eye's own, which the iris and the slit
+    # pupil of the eye material are drawn in.
     eyes = []
     for s in (-1, 1):
-        c = Vector((0.172, s * 0.032, 0.617))
-        e = MeshBuilder(c)
-        e.ellipsoid(c, (0.0175,) * 3, 0)
-        e.ellipsoid(c + Vector((0.0158, 0, 0)), (0.003, 0.0045, 0.0135), 1, segments=16, rings=8)
-        eyes.append(e.to_object("EyeL" if s > 0 else "EyeR", [mats["eye"], mats["pupil"]], coll, head_rig, c - NECK))
+        c = EYE_CENTRE * Vector((1, s, 1))
+        e = MeshBuilder()
+        e.ellipsoid((0, 0, 0), EYE_RADII, 0, segments=48, rings=24)
+        eye = e.to_object("EyeL" if s > 0 else "EyeR", [mats["eye"]], coll, head_rig, c - NECK)
+        eye.rotation_euler = (s * 0.2, 0.0, s * 0.35)
+        eyes.append(eye)
     return head_rig, ears, eyes, whiskers
 
 

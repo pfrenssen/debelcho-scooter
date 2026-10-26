@@ -8,12 +8,8 @@ the shot.
 - **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
   and tail), add clumping and some flyaway strands, and use the Principled Hair BSDF for Cycles
   renders.
-- **Face likeness.** Model the face on the reference photo `~/Downloads/IMG_20230519_184720.jpg`:
-  a wedge-shaped head with a narrow muzzle, large upright ears set high and wide at the base,
-  almond-shaped pale green-gold eyes with vertical slit pupils (now round and yellow), dark
-  charcoal nose leather (now pink), long white whiskers, and a short glossy black coat.
 - **Face detail.** Eyes with a refractive cornea over the iris, tufts inside the ears, a
-  mouth line and whisker pads.
+  mouth line, and the short whiskers above the eyes.
 - **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
   them so each toe wraps the grip.
 
