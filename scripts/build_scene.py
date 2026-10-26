@@ -16,6 +16,7 @@ from pathlib import Path
 import bmesh
 import bpy
 import numpy as np
+from bpy_extras import anim_utils
 from mathutils import Matrix, Vector, kdtree, noise
 from mathutils.bvhtree import BVHTree
 
@@ -24,7 +25,7 @@ BLEND_PATH = ROOT / "build" / "cat_scooter.blend"
 TEXTURES = ROOT / "assets" / "textures"  # fetched by scripts/fetch_textures.py
 
 FPS = 24
-FRAME_END = 288
+FRAME_END = 480
 SEED = 7
 
 TERRAIN_SIZE = 260.0
@@ -79,7 +80,7 @@ BASE_SPEED = 4.5  # m/s
 RIDE_START_X = -22.0
 
 # Speed bumps, as distances along the road from the ride start (m).
-BUMPS = [8.0, 27.0, 46.0]
+BUMPS = [8.0, 27.0, 46.0, 65.0, 84.0]
 BUMP_HEIGHT = 0.04
 BUMP_LENGTH = 0.35
 ROAD_ROUGHNESS = 0.003
@@ -104,15 +105,25 @@ DOF_FSTOP = 2.8
 CLOUD_SCALE = 1.2
 CLOUD_COVER = 0.45  # noise threshold where clouds begin; lower is more cloud
 
-# Camera path keys: (frame, angle from forward towards left in degrees, distance, height).
+# Camera path keys: (frame, angle from forward towards left in degrees, distance, height, lens in
+# mm). The chase shots behind and in front use a longer lens from further away; the side shots
+# stay close and wide so the camera does not leave the road for the verge grass.
 CAMERA_KEYS = [
-    (1, 168.0, 2.3, 0.65),
-    (70, 150.0, 2.0, 0.50),
-    (140, 95.0, 1.7, 0.30),
-    (200, 45.0, 1.9, 0.35),
-    (240, 20.0, 2.2, 0.45),
-    (288, -35.0, 2.6, 0.55),
+    (1, 168.0, 3.4, 0.70, 50.0),
+    (90, 155.0, 3.0, 0.55, 50.0),
+    (170, 120.0, 2.3, 0.40, 40.0),
+    (230, 95.0, 1.7, 0.30, 32.0),
+    (300, 50.0, 2.0, 0.35, 35.0),
+    (360, 20.0, 2.8, 0.45, 45.0),
+    (420, -10.0, 3.4, 0.50, 50.0),
+    (480, -25.0, 3.2, 1.30, 40.0),  # rises over the verge grass as it swings to the side
 ]
+# Handheld shake: noise on the camera's rotation, (strength in radians, period in frames) per
+# axis: tilt, pan, roll.
+SHAKE = [(0.010, 28.0), (0.012, 34.0), (0.006, 40.0)]
+VIGNETTE = 0.15  # darkening at distance 1 from the centre (half the frame width), growing with r²
+GRAIN = 0.08  # film grain amplitude as a fraction of the linear pixel value, before the AgX view
+BLINKS = [88, 176, 300, 420]
 
 
 def smoothstep(e0, e1, x):
@@ -2132,7 +2143,7 @@ def pose_cat(rig, lean, drop, breath, frame):
             bone.keyframe_insert(path, frame=frame)
 
 
-EAR_TWITCHES = {0: [150], 1: [60, 205]}  # ear index (right, left) -> start frames
+EAR_TWITCHES = {0: [150, 340], 1: [60, 205, 445]}  # ear index (right, left) -> start frames
 
 
 def twitch(frame, starts):
@@ -2225,19 +2236,23 @@ def animate(scene, road, scooter, cam, cat):
 
         cam_h = heading(tan)
         cam_heading = cam_h if cam_heading is None else cam_heading + wrap_angle(cam_h - cam_heading) * 0.08
-        angle, dist, height = catmull_rom(CAMERA_KEYS, frame)
+        angle, dist, height, lens = catmull_rom(CAMERA_KEYS, frame)
         a = cam_heading + math.radians(angle)
         cam_pos = pos + Vector((math.cos(a), math.sin(a), 0.0)) * dist + Vector((0, 0, height))
-        cam_pos.z = max(cam_pos.z, road.terrain_height(cam_pos.x, cam_pos.y) + 0.25)
-        cam.location = cam_pos
-        cam.keyframe_insert("location", frame=frame)
+        # Keep 0.25 m above the road and 0.45 m above the verge, clear of the grass.
+        verge = smoothstep(ROAD_HALF_WIDTH - 0.2, ROAD_HALF_WIDTH + 0.3, road.distance(cam_pos.x, cam_pos.y)[1])
+        cam_pos.z = max(cam_pos.z, road.terrain_height(cam_pos.x, cam_pos.y) + 0.25 + 0.2 * verge)
+        cam.parent.location = cam_pos
+        cam.parent.keyframe_insert("location", frame=frame)
+        cam.data.lens = lens
+        cam.data.keyframe_insert("lens", frame=frame)
 
         susp.advance(road, s, v / FPS, v)
         travelled += v / FPS
         s += v / FPS
 
     for eye in cat.eyes:
-        for f, sz in ((1, 1.0), (88, 1.0), (90, 0.1), (93, 1.0), (176, 1.0), (178, 0.1), (181, 1.0)):
+        for f, sz in [(1, 1.0)] + [(b + df, sz) for b in BLINKS for df, sz in ((0, 1.0), (2, 0.1), (5, 1.0))]:
             eye.scale = (1.0, 1.0, sz)
             eye.keyframe_insert("scale", frame=f)
 
@@ -2248,8 +2263,37 @@ def animate(scene, road, scooter, cam, cat):
 # --------------------------------------------------------------------------- scene
 
 
-def add_bloom(scene):
-    """Compositor glare so the scooter lights and the sun bloom."""
+def build_camera(scene, target):
+    """Camera on an empty that animate() moves along the path and that tracks the target; the
+    camera itself only adds the handheld shake as noise on its rotation relative to the empty."""
+    rig = make_empty("CameraRig", scene.collection)
+    track = rig.constraints.new('TRACK_TO')
+    track.target = target
+    track.track_axis = 'TRACK_NEGATIVE_Z'
+    track.up_axis = 'UP_Y'
+
+    data = bpy.data.cameras.new("Camera")
+    data.clip_start = 0.05
+    data.clip_end = FAR_RADIUS * 1.5
+    data.dof.use_dof = True
+    data.dof.focus_object = target
+    data.dof.aperture_fstop = DOF_FSTOP
+    cam = link(bpy.data.objects.new("Camera", data), scene.collection, rig)
+    cam.keyframe_insert("rotation_euler", frame=1)
+    channels = anim_utils.action_get_channelbag_for_slot(cam.animation_data.action, cam.animation_data.action_slot)
+    for fcurve in channels.fcurves:
+        strength, period = SHAKE[fcurve.array_index]
+        shake = fcurve.modifiers.new('NOISE')
+        shake.strength, shake.scale = strength, period
+        shake.depth = 2  # a second octave for the faster jitter of the hands
+        shake.phase = 17.0 * fcurve.array_index
+    scene.camera = cam
+    return cam
+
+
+def add_compositing(scene):
+    """Compositor glare so the scooter lights and the sun bloom, then a lens vignette and film
+    grain that changes every frame."""
     tree = bpy.data.node_groups.new("Compositing", 'CompositorNodeTree')
     tree.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
     layers = tree.nodes.new('CompositorNodeRLayers')
@@ -2257,9 +2301,28 @@ def add_bloom(scene):
     glare.inputs['Type'].default_value = 'Bloom'
     glare.inputs['Threshold'].default_value = 1.0
     glare.inputs['Strength'].default_value = 0.5
-    out = tree.nodes.new('NodeGroupOutput')
     tree.links.new(layers.outputs['Image'], glare.inputs['Image'])
-    tree.links.new(glare.outputs['Image'], out.inputs[0])
+
+    coords = tree.nodes.new('CompositorNodeImageCoordinates')
+    tree.links.new(layers.outputs['Image'], coords.inputs['Image'])
+    r2 = tree.nodes.new('ShaderNodeVectorMath')
+    r2.operation = 'DOT_PRODUCT'
+    tree.links.new(coords.outputs['Uniform'], r2.inputs[0])
+    tree.links.new(coords.outputs['Uniform'], r2.inputs[1])
+    vignette = math_node(tree, 'MULTIPLY_ADD', r2.outputs['Value'], -VIGNETTE)
+    vignette.node.inputs[2].default_value = 1.0
+
+    grain = tree.nodes.new('ShaderNodeTexWhiteNoise')
+    grain.noise_dimensions = '4D'
+    time = tree.nodes.new('CompositorNodeSceneTime')
+    tree.links.new(coords.outputs['Pixel'], grain.inputs['Vector'])
+    tree.links.new(time.outputs['Frame'], grain.inputs['W'])
+    grain_gain = math_node(tree, 'MULTIPLY_ADD', grain.outputs['Value'], 2.0 * GRAIN)
+    grain_gain.node.inputs[2].default_value = 1.0 - GRAIN
+
+    gain = math_node(tree, 'MULTIPLY', vignette, grain_gain)
+    out = tree.nodes.new('NodeGroupOutput')
+    tree.links.new(mix_colour(tree, 1.0, glare.outputs['Image'], gain, 'MULTIPLY'), out.inputs[0])
     scene.compositing_node_group = tree
 
 
@@ -2279,7 +2342,7 @@ def configure_render(scene):
     scene.render.motion_blur_shutter = 0.5
     scene.view_settings.view_transform = 'AgX'
     scene.view_settings.look = 'AgX - Medium High Contrast'
-    add_bloom(scene)
+    add_compositing(scene)
     scene.render.filepath = "//render/cat_scooter_"
     scene.render.image_settings.media_type = 'VIDEO'
     scene.render.image_settings.file_format = 'FFMPEG'
@@ -2306,20 +2369,7 @@ def main():
     scooter = build_scooter(mats, actors)
     cat = build_cat(mats, actors, scooter.body)
 
-    cam_data = bpy.data.cameras.new("Camera")
-    cam_data.lens = 32
-    cam_data.clip_start = 0.05
-    cam_data.clip_end = FAR_RADIUS * 1.5
-    cam = link(bpy.data.objects.new("Camera", cam_data), scene.collection)
-    track = cam.constraints.new('TRACK_TO')
-    track.target = scooter.target
-    track.track_axis = 'TRACK_NEGATIVE_Z'
-    track.up_axis = 'UP_Y'
-    cam_data.dof.use_dof = True
-    cam_data.dof.focus_object = scooter.target
-    cam_data.dof.aperture_fstop = DOF_FSTOP
-    scene.camera = cam
-
+    cam = build_camera(scene, scooter.target)
     ride_x = animate(scene, road, scooter, cam, cat)
 
     terrain = build_terrain(road, mats, env, ride_x)

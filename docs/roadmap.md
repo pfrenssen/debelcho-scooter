@@ -26,11 +26,6 @@ the shot.
 - **Vegetation variety.** Bushes, wildflowers and fallen needles on the verges; a second tree
   species for variety next to the firs.
 
-## Camera
-
-- Light handheld shake, a slightly longer lens for the chase shots, focus that follows the cat,
-  and subtle vignetting and film grain.
-
 ## Rendering
 
 - **Cycles on the GPU.** With `hip-runtime-amd` installed, Cycles lists the Radeon 680M as a HIP
