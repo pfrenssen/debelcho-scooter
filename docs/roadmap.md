@@ -11,8 +11,6 @@ the shot.
 - **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
   and tail), add clumping and some flyaway strands, and use the Principled Hair BSDF for Cycles
   renders.
-- **Face detail.** Eyes with a refractive cornea over the iris, tufts inside the ears, a
-  mouth line, and the short whiskers above the eyes.
 - **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
   them so each toe wraps the grip.
 

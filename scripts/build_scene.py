@@ -94,6 +94,8 @@ CAT_PIVOT = Vector((-0.04, 0.0, 0.117))  # in the cat's modelling frame; see CAT
 NECK = Vector((0.09, 0.0, 0.52))
 EYE_CENTRE = Vector((0.166, 0.031, 0.613))  # left eye; the right one mirrors it
 EYE_RADII = (0.013, 0.0155, 0.0105)  # depth, width, height in the eye's own frame
+CORNEA_BULGE = 1.05  # the cornea's depth as a multiple of the eye's
+IRIS_DEPTH = 0.7  # the flat iris sits this fraction of the eye's depth in front of its centre
 NOSE_CENTRE = Vector((0.192, 0.0, 0.586))
 TAIL_BASE = Vector((-0.13, 0.0, 0.21))
 
@@ -518,6 +520,7 @@ def build_materials():
         "screen": make_material("Display", (0.05, 0.4, 0.6), 0.2, emission=(0.1, 0.6, 1.0), strength=2.0),
         "fur": make_material("BlackFur", (0.008, 0.008, 0.009), 0.9),  # skin under the fur strands
         "eye": eye_material(),
+        "cornea": cornea_material(),
         "nose": make_material("CatNose", (0.03, 0.028, 0.03), 0.5),
         "inner_ear": make_material("InnerEar", (0.10, 0.05, 0.05), 0.55),
         "whisker": make_material("Whisker", (0.8, 0.8, 0.77), 0.35),
@@ -525,6 +528,7 @@ def build_materials():
         "bump_yellow": make_material("BumpYellow", (0.9, 0.65, 0.02), 0.6),
         "spring": make_material("Spring", (0.12, 0.12, 0.13), 0.3, metallic=1.0),
         "strands": strand_material(),
+        "ear_tufts": make_material("EarTufts", (0.12, 0.115, 0.11), 0.4),  # pale hairs inside the ears
     }
     return m
 
@@ -705,9 +709,9 @@ def grass_blade_material():
 
 def eye_material():
     """Pale green-gold iris, golden round the pupil and with a dark rim, and a vertical slit
-    pupil, drawn in the eye object's own frame (+X out of the eye, +Z up), under a glossy
+    pupil, drawn in the eye object's own frame (+X out of the eye, +Z up), seen through the
     cornea. A little emission keeps the eyes catching the light in the dusk."""
-    mat = make_material("CatEye", (0.45, 0.52, 0.25), 0.05, inputs={"Coat Weight": 1.0, "Coat Roughness": 0.03})
+    mat = make_material("CatEye", (0.45, 0.52, 0.25), 0.4)
     nt = mat.node_tree
     bsdf = principled_node(mat)
     coord = nt.nodes.new('ShaderNodeTexCoord')
@@ -738,6 +742,28 @@ def eye_material():
     nt.links.new(colour, bsdf.inputs['Base Color'])
     nt.links.new(colour, bsdf.inputs['Emission Color'])
     bsdf.inputs['Emission Strength'].default_value = 0.25
+    return mat
+
+
+def cornea_material():
+    """Clear dome over the iris that carries the eye's sharp reflections, by the Fresnel factor
+    of the cornea. It does not refract: EEVEE's screen-space refraction lost or shifted the
+    pupil behind a dome this small, so the depth comes from the iris set back behind it."""
+    mat = bpy.data.materials.new("Cornea")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    fresnel = nt.nodes.new('ShaderNodeFresnel')
+    fresnel.inputs['IOR'].default_value = 1.376
+    clear = nt.nodes.new('ShaderNodeBsdfTransparent')
+    gloss = nt.nodes.new('ShaderNodeBsdfGlossy')
+    gloss.inputs['Roughness'].default_value = 0.02
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    nt.links.new(fresnel.outputs['Fac'], mix.inputs['Fac'])
+    nt.links.new(clear.outputs['BSDF'], mix.inputs[1])
+    nt.links.new(gloss.outputs['BSDF'], mix.inputs[2])
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
     return mat
 
 
@@ -1592,11 +1618,11 @@ def remesh(obj, voxel_size, smooth_iterations):
     mesh.shade_smooth()
 
 
-def add_fur(obj, mats, count, length, direction, density_group=None):
+def add_fur(obj, mats, count, length, direction, density_group=None, strands="strands"):
     """Particle hair of the given length along the normal; direction, in units of that length,
     is added to comb the strands. Blender grows hair for 4 time units at the emission velocity
     (hair_length is an alias for 4 * normal_factor)."""
-    obj.data.materials.append(mats["strands"])
+    obj.data.materials.append(mats[strands])
     ps = bpy.data.particles.new(f"{obj.name}Fur")
     ps.type = 'HAIR'
     ps.count = count
@@ -1621,7 +1647,7 @@ def add_fur(obj, mats, count, length, direction, density_group=None):
     obj.modifiers.new("Fur", 'PARTICLE_SYSTEM')
     psys = obj.particle_systems[-1]
     psys.settings = ps
-    ps.material_slot = mats["strands"].name  # the enum lists the slots of the objects using ps
+    ps.material_slot = mats[strands].name  # the enum lists the slots of the objects using ps
     psys.seed = SEED
     if density_group:
         psys.vertex_group_density = density_group
@@ -1963,6 +1989,17 @@ def build_tail(mats, coll, cat_rig):
     return curve
 
 
+def whisker(b, start, direction, length, droop, radius):
+    """A tapering whisker of three segments from start along direction, bending by droop (in
+    units of the length) towards the tip."""
+    direction = direction.normalized()
+    points = [start + direction * length * t + droop * length * t * t for t in (0.0, 0.33, 0.66, 1.0)]
+    radii = [radius * f for f in (1.0, 0.74, 0.48, 0.2)]
+    for p0, p1, r0, r1 in zip(points, points[1:], radii, radii[1:]):
+        d = p1 - p0
+        b.cylinder(Matrix.Translation((p0 + p1) / 2) @ align_z(d), r0, d.length, 0, segments=5, radius2=r1)
+
+
 def build_head(mats, coll, cat_rig):
     head_rig = make_empty("HeadRig", coll, cat_rig, NECK - CAT_PIVOT, size=0.05)
     head_rig.scale = (1.12, 1.12, 1.12)
@@ -1980,13 +2017,41 @@ def build_head(mats, coll, cat_rig):
         b.ellipsoid((0.166, s * 0.031, 0.627), (0.014, 0.018, 0.007), 0, rot=R(s * 0.2, 'X'))  # brow
     head = b.to_object("CatHead", [mats["fur"]], coll, head_rig)
     remesh(head, 0.003, 6)
-    # No fur on the eyes and the nose leather.
+
+    # Mouth line: from under the nose down the philtrum, then out and down to each corner,
+    # projected onto the muzzle along -X.
+    bvh = BVHTree.FromObject(head, bpy.context.evaluated_depsgraph_get())
+    mouth = []
+    for s in (-1, 1):
+        keys = [(0.0, 0.5805), (0.0, 0.5745), (s * 0.004, 0.5725), (s * 0.009, 0.5712), (s * 0.014, 0.5708),
+                (s * 0.018, 0.5715)]
+        line = []
+        for (y0, z0), (y1, z1) in zip(keys, keys[1:]):
+            for k in range(8):
+                y, z = lerp(y0, y1, k / 8), lerp(z0, z1, k / 8)
+                hit, normal, _, _ = bvh.ray_cast(Vector((0.3, y, z)) - NECK, Vector((-1, 0, 0)))
+                line.append(hit + normal * 0.0003)
+        mouth.append(line)
+    lips = MeshBuilder()
+    for line in mouth:
+        for p0, p1 in zip(line, line[1:]):
+            d = p1 - p0
+            lips.cylinder(Matrix.Translation((p0 + p1) / 2) @ align_z(d), 0.00035, d.length, 0, segments=6)
+    lips.to_object("CatMouth", [mats["nose"]], coll, head_rig)
+    mouth_points = kdtree.KDTree(sum(len(line) for line in mouth))
+    for k, p in enumerate(p for line in mouth for p in line):
+        mouth_points.insert(p, k)
+    mouth_points.balance()
+
+    # No fur on the eyes and the nose leather, and only a little along the mouth line.
     bare = [(EYE_CENTRE * Vector((1, s, 1)), 0.016, 0.022) for s in (-1, 1)]
     bare.append((NOSE_CENTRE, 0.009, 0.015))
     group = head.vertex_groups.new(name="FurDensity")
     for v in head.data.vertices:
         p = v.co + NECK
-        group.add([v.index], min(smoothstep(r0, r1, (p - c).length) for c, r0, r1 in bare), 'REPLACE')
+        density = min(smoothstep(r0, r1, (p - c).length) for c, r0, r1 in bare)
+        density = min(density, smoothstep(0.0015, 0.0035, mouth_points.find(v.co)[2]))
+        group.add([v.index], density, 'REPLACE')
     add_fur(head, mats, 3500, 0.006, (-1.2, 0.0, 0.0), density_group=group.name)
 
     # Nose leather: a rounded triangle, wide at the top.
@@ -2007,15 +2072,18 @@ def build_head(mats, coll, cat_rig):
                                                   (0.188, 0.562, -0.1, 0.11), (0.181, 0.563, -0.16, 0.1),
                                                   (0.186, 0.557, -0.22, 0.09))):
             start = Vector((x, s * (0.022 + 0.6 * (0.19 - x)), z))
-            direction = Vector((0.3, s, rise)).normalized()
-            points = [start + direction * length * t + Vector((-0.25, 0, -0.18)) * length * t * t
-                      for t in (0.0, 0.33, 0.66, 1.0)]
-            for (p0, r0), (p1, r1) in zip(zip(points, (0.0005, 0.00037, 0.00024, 0.0001)),
-                                          zip(points[1:], (0.00037, 0.00024, 0.0001))):
-                d = p1 - p0
-                w.cylinder(Matrix.Translation((p0 + p1) / 2) @ align_z(d), r0, d.length, 0, segments=5, radius2=r1)
+            whisker(w, start, Vector((0.3, s, rise)), length, Vector((-0.25, 0, -0.18)), 0.0005)
         whiskers.append(w.to_object("WhiskersL" if s > 0 else "WhiskersR", [mats["whisker"]], coll, head_rig,
                                     root - NECK))
+
+    # Shorter whiskers above the eyes, from the inner brow, curving up and back.
+    for s in (-1, 1):
+        w = MeshBuilder(NECK)
+        for k, (spread, rise, length) in enumerate(((0.3, 1.0, 0.05), (0.5, 0.9, 0.045), (0.7, 0.8, 0.04),
+                                                    (0.9, 0.6, 0.035))):
+            start = Vector((0.172, s * (0.02 + 0.004 * k), 0.629))
+            whisker(w, start, Vector((0.35, s * spread, rise)), length, Vector((-0.5, s * 0.2, -0.25)), 0.0003)
+        w.to_object("BrowWhiskersL" if s > 0 else "BrowWhiskersR", [mats["whisker"]], coll, head_rig)
 
     # Large upright ears, set high and wide at the base.
     ears = []
@@ -2027,6 +2095,13 @@ def build_head(mats, coll, cat_rig):
         e.cone(Matrix.Translation(base + Vector((0.0155, 0, 0.006))) @ R(-0.26, 'Y') @ S(0.15, 1, 1), 0.027, 0.056, 1)
         ear = e.to_object("EarL" if s > 0 else "EarR", [mats["fur"], mats["inner_ear"]], coll, head_rig, base - NECK)
         ear.rotation_euler = (-s * 0.3, -0.12, s * 0.2)
+        # Tufts of pale hair from the front of the inner ear, low down, combed a little upwards.
+        tufts = ear.vertex_groups.new(name="Tufts")
+        inner = {v for poly in ear.data.polygons if poly.material_index == 1 for v in poly.vertices}
+        for v in ear.data.vertices:
+            if v.index in inner and v.normal.x > 0.2:
+                tufts.add([v.index], 1.0 - smoothstep(0.01, 0.03, v.co.z), 'REPLACE')
+        add_fur(ear, mats, 120, 0.008, (0.0, 0.0, 0.5), density_group=tufts.name, strands="ear_tufts")
         ears.append(ear)
 
     # Almond eyes: ellipsoids set into the head under the brows, turned a little outwards and
@@ -2037,8 +2112,16 @@ def build_head(mats, coll, cat_rig):
         c = EYE_CENTRE * Vector((1, s, 1))
         e = MeshBuilder()
         e.ellipsoid((0, 0, 0), EYE_RADII, 0, segments=48, rings=24)
+        for v in e.bm.verts:  # the iris is a flat disc, set back behind the cornea
+            v.co.x = min(v.co.x, IRIS_DEPTH * EYE_RADII[0])
         eye = e.to_object("EyeL" if s > 0 else "EyeR", [mats["eye"]], coll, head_rig, c - NECK)
         eye.rotation_euler = (s * 0.2, 0.0, s * 0.35)
+        # The cornea bulges out in front of the iris; as a child of the eye it blinks with it.
+        cornea = MeshBuilder()
+        cornea.ellipsoid((0, 0, 0), (EYE_RADII[0] * CORNEA_BULGE, EYE_RADII[1] * 1.03, EYE_RADII[2] * 1.03), 0,
+                         segments=48, rings=24)
+        cornea = cornea.to_object("CorneaL" if s > 0 else "CorneaR", [mats["cornea"]], coll, eye)
+        cornea.visible_shadow = False
         eyes.append(eye)
     return head_rig, ears, eyes, whiskers
 
