@@ -133,6 +133,12 @@ CAMERA_KEYS = [
 SHAKE = [(0.010, 28.0), (0.012, 34.0), (0.006, 40.0)]
 VIGNETTE = 0.15  # darkening at distance 1 from the centre (half the frame width), growing with r²
 GRAIN = 0.08  # film grain amplitude as a fraction of the linear pixel value, before the AgX view
+# Primary grade, ASC CDL on the linear image before the AgX view: slightly deeper blacks, cool
+# shadows, warm highlights. Stronger blacks merge the black cat with the road in the dark shots.
+GRADE_OFFSET = -0.003  # added to all channels
+GRADE_SHADOW_TINT = (0.0, 0.001, 0.002)  # added on top per channel; the colour socket clamps below 0
+GRADE_SLOPE = (1.03, 1.0, 0.97)
+GRADE_SATURATION = 1.12
 BLINKS = [88, 176, 300, 420]
 
 
@@ -2480,8 +2486,8 @@ def build_camera(scene, target):
 
 
 def add_compositing(scene):
-    """Compositor glare so the scooter lights and the sun bloom, then a lens vignette and film
-    grain that changes every frame."""
+    """Compositor glare so the scooter lights and the sun bloom, a primary grade, then a lens
+    vignette and film grain that changes every frame."""
     tree = bpy.data.node_groups.new("Compositing", 'CompositorNodeTree')
     tree.interface.new_socket("Image", in_out='OUTPUT', socket_type='NodeSocketColor')
     layers = tree.nodes.new('CompositorNodeRLayers')
@@ -2490,6 +2496,16 @@ def add_compositing(scene):
     glare.inputs['Threshold'].default_value = 1.0
     glare.inputs['Strength'].default_value = 0.5
     tree.links.new(layers.outputs['Image'], glare.inputs['Image'])
+
+    cdl = tree.nodes.new('CompositorNodeColorBalance')
+    cdl.inputs['Type'].default_value = 'Offset/Power/Slope (ASC-CDL)'
+    cdl.inputs['Base Offset'].default_value = GRADE_OFFSET
+    cdl.inputs['Color Offset'].default_value = (*GRADE_SHADOW_TINT, 1.0)
+    cdl.inputs['Color Slope'].default_value = (*GRADE_SLOPE, 1.0)
+    tree.links.new(glare.outputs['Image'], cdl.inputs['Image'])
+    saturation = tree.nodes.new('CompositorNodeHueSat')
+    saturation.inputs['Saturation'].default_value = GRADE_SATURATION
+    tree.links.new(cdl.outputs['Image'], saturation.inputs['Image'])
 
     coords = tree.nodes.new('CompositorNodeImageCoordinates')
     tree.links.new(layers.outputs['Image'], coords.inputs['Image'])
@@ -2510,7 +2526,7 @@ def add_compositing(scene):
 
     gain = math_node(tree, 'MULTIPLY', vignette, grain_gain)
     out = tree.nodes.new('NodeGroupOutput')
-    tree.links.new(mix_colour(tree, 1.0, glare.outputs['Image'], gain, 'MULTIPLY'), out.inputs[0])
+    tree.links.new(mix_colour(tree, 1.0, saturation.outputs['Image'], gain, 'MULTIPLY'), out.inputs[0])
     scene.compositing_node_group = tree
 
 
