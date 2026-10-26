@@ -44,12 +44,12 @@ ROAD_STEP = 0.25
 GRASS_DENSITY = 160.0  # clumps per square metre at the road verge
 GRASS_CLUMPS = 6  # clump variants
 # Hay barn in the Kleinwalsertal style on the slope right of the road, a background detail.
-BARN_SITE = (17.0, -31.0)
-BARN_YAW = 0.3  # radians the ridge turns from +X towards +Y
-BARN_SIZE = (7.0, 5.5)  # length along the ridge, width across it
-BARN_EAVE = 3.4  # wall height above the floor, which is level with the ground at the uphill end
-BARN_PITCH = math.radians(25.0)
-BARN_OVERHANG = (0.9, 0.8)  # roof overhang at the gables and at the eaves
+BARN_SITE = (15.0, -15.0)  # in frame from the start to the front shots; the ground falls 1.5 m across it
+BARN_YAW = 0.0  # the long wall with the hay racks faces the road
+BARN_SIZE = (9.0, 6.5)  # length along the ridge, width across it
+BARN_EAVE = 4.2  # wall height above the floor, which is level with the ground at the uphill end
+BARN_PITCH = math.radians(22.0)
+BARN_OVERHANG = (1.0, 0.9)  # roof overhang at the gables and at the eaves
 LOG_RADIUS = 0.11
 
 # Wind: gusts are noise blobs drifting downwind; grass clumps and trees lean downwind with the
@@ -514,8 +514,13 @@ def build_materials():
         "paint": make_material("RoadPaint", (0.85, 0.82, 0.70), 0.6),
         "wood": make_material("FenceWood", (0.20, 0.12, 0.06), 0.8),
         "wire": make_material("FenceWire", (0.4, 0.4, 0.42), 0.4, metallic=1.0),
-        "logs": textured_material("BarnLogs", (0.035, 0.025, 0.018), (0.11, 0.08, 0.06), 1.5, 20.0, 0.85),
-        "roof": textured_material("BarnRoof", (0.16, 0.045, 0.025), (0.30, 0.09, 0.04), 2.0, 40.0, 0.6, 0.05),
+        # Weathered logs vary from dark brown to silvery grey-brown; the slats and boards are paler.
+        "logs": [textured_material(f"BarnLogs.{k}", low, high, 1.5, 20.0, 0.85) for k, (low, high) in enumerate((
+            ((0.025, 0.017, 0.012), (0.06, 0.042, 0.03)),
+            ((0.05, 0.035, 0.025), (0.10, 0.075, 0.055)),
+            ((0.08, 0.07, 0.06), (0.15, 0.13, 0.11))))],
+        "boards": textured_material("BarnBoards", (0.09, 0.085, 0.075), (0.20, 0.19, 0.17), 3.0, 30.0, 0.85),
+        "roof": textured_material("BarnRoof", (0.07, 0.025, 0.015), (0.18, 0.06, 0.03), 2.0, 40.0, 0.6, 0.05),
         "blades": grass_blade_material(),
         "rock": textured_material("Rock", (0.08, 0.075, 0.07), (0.16, 0.15, 0.13), 3.0, 12.0, 0.8, 0.4),
         "frame": make_material("ScooterPaint", (0.045, 0.047, 0.05), 0.35, metallic=0.6, inputs={"Coat Weight": 0.5}),
@@ -1103,9 +1108,11 @@ def build_fence(road, mats, coll):
 
 
 def build_barn(road, mats, coll):
-    """Log barn with notched corners, a low gable roof of rusty sheet metal with deep overhangs,
-    purlins and a plank door. The floor is level with the ground at the uphill end; the walls run
-    down into the slope everywhere else."""
+    """Hay barn after ~/Downloads/Austria-kleinwalsertal-hiking3.jpg: weathered log walls with
+    notched corners, a low gable roof of rusty sheet metal with deep overhangs, purlin ends and a
+    snow guard, slatted hay racks and a boarded section on the long wall, and a plank door. The
+    floor is level with the ground at the uphill end; the walls run down into the slope
+    everywhere else."""
     rng = random.Random(SEED)  # its own generator, so the scatter of trees and rocks stays put
     length, width = BARN_SIZE
     origin = Matrix.Translation((*BARN_SITE, 0.0)) @ R(BARN_YAW, 'Z')
@@ -1119,19 +1126,23 @@ def build_barn(road, mats, coll):
     # log runs past the corners. The gable walls continue up into the roof triangle.
     step = 2 * LOG_RADIUS * 0.9
     stub = 0.3
+    weathering = (0, 0, 0, 1, 1, 2)  # material index of a log: mostly dark, some grey
+
+    def log(p0, p1):
+        b.rod(p0, p1, LOG_RADIUS * rng.uniform(0.9, 1.05), mat=rng.choice(weathering), segments=8)
+
     z = bottom
     while z < floor + BARN_EAVE + rise:
         for side in (-1, 1):
             if z < floor + BARN_EAVE:
                 y = side * width / 2
                 half = length / 2 + stub + rng.uniform(-0.05, 0.05)
-                b.rod((-half, y, z), (half, y, z), LOG_RADIUS * rng.uniform(0.9, 1.05), segments=8)
+                log((-half, y, z), (half, y, z))
             above = max(0.0, z + step / 2 - floor - BARN_EAVE)
             half = width / 2 * (1.0 - above / rise) + (stub if above == 0 else 0.0)
             if half > LOG_RADIUS:
                 x = side * length / 2
-                b.rod((x, -half, z + step / 2), (x, half, z + step / 2), LOG_RADIUS * rng.uniform(0.9, 1.05),
-                      segments=8)
+                log((x, -half, z + step / 2), (x, half, z + step / 2))
         z += step
 
     # Purlins along the ridge and the slopes, sticking out under the gable overhang.
@@ -1142,19 +1153,40 @@ def build_barn(road, mats, coll):
         z = ridge - abs(y) * math.tan(BARN_PITCH) - 0.06
         b.box((0.0, y, z), (2 * reach, 0.14, 0.16), mat=0)
 
-    # Two roof slabs meeting at the ridge.
+    # Two roof slabs meeting at the ridge, with a snow guard rail near each eave.
     run = width / 2 + BARN_OVERHANG[1]
     for side in (-1, 1):
         centre = (0.0, side * run / 2, ridge + 0.06 - run / 2 * math.tan(BARN_PITCH))
-        b.box(centre, (length + 2 * BARN_OVERHANG[0], run / math.cos(BARN_PITCH), 0.05), mat=1,
+        b.box(centre, (length + 2 * BARN_OVERHANG[0], run / math.cos(BARN_PITCH), 0.05), mat=3,
               rot=R(-side * BARN_PITCH, 'X'))
+        y = side * (run - 0.7)
+        z = ridge + 0.15 - abs(y) * math.tan(BARN_PITCH)
+        b.rod((-length / 2 - BARN_OVERHANG[0] + 0.2, y, z), (length / 2 + BARN_OVERHANG[0] - 0.2, y, z), 0.025,
+              mat=3, segments=6)
+
+    # Hay racks on the long wall facing the road: two rows of vertical slats from the downhill
+    # corner, each row hung from a rail.
+    face = width / 2 + LOG_RADIUS + 0.06
+    start, end = -length / 2 + 0.3, 0.6
+    for top in (floor + BARN_EAVE - 0.3, floor + BARN_EAVE - 1.5):
+        x = start + 0.1
+        while x < end:
+            drop = rng.uniform(0.6, 1.1)
+            b.box((x, face, top - drop / 2), (0.035, 0.02, drop), mat=4)
+            x += rng.uniform(0.07, 0.12)
+        b.box(((start + end) / 2, face - 0.03, top + 0.02), (end - start, 0.06, 0.06), mat=4)
+
+    # Pale vertical boards closing the uphill end of the same wall.
+    for k in range(9):
+        x = length / 2 - 0.3 - 0.19 * k
+        b.box((x, width / 2 + LOG_RADIUS + 0.02, floor + 0.8), (0.18, 0.03, 2.0), mat=4)
 
     # Plank door in the downhill gable, on the ground there.
     door = origin @ Vector((-length / 2, 0.8, 0.0))
     sill = road.terrain_height(door.x, door.y)
     b.box((-length / 2 - LOG_RADIUS - 0.02, 0.8, sill + 0.9), (0.04, 1.0, 1.8), mat=0)
 
-    barn = b.to_object("Barn", [mats["logs"], mats["roof"]], coll, location=(*BARN_SITE, 0.0))
+    barn = b.to_object("Barn", [*mats["logs"], mats["roof"], mats["boards"]], coll, location=(*BARN_SITE, 0.0))
     barn.rotation_euler.z = BARN_YAW
     return barn
 
