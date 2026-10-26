@@ -54,6 +54,10 @@ STONE_OFFSET = 0.45  # from the road edge to the middle of a stone
 STONE_DROP = 0.4  # metres the ground must fall within 4 m of the right edge for guard stones
 GRASS_DENSITY = 160.0  # clumps per square metre at the road verge
 GRASS_CLUMPS = 6  # clump variants
+GRASS_VIEW_HALF = (0.6, 0.4)  # tangents of the half field of view the grass is kept in: 32 mm lens and some
+GRASS_VIEW_MARGIN = 5.0  # metres around the view: a 30 cm clump casts a 4 m shadow in the low sun
+GRASS_THIN = 10.0  # metres from the camera within which every clump is kept
+GRASS_THIN_SCALE = 2.5  # most a thinned-out clump is scaled up
 FOREST_START = 60.0  # metres from the camera path to the edge of the dense forest
 FOREST_SPACING = 3.5  # grid the forest firs are jittered on: the crowns touch
 FOREST_RADIUS = 600.0
@@ -1705,7 +1709,7 @@ def forest_cover(x, y, cam_distance):
 
 def forest_points(road, cam_path):
     """The dense forest: LOD3 firs on a jittered FOREST_SPACING grid out to FOREST_RADIUS,
-    where forest_cover allows, the camera sees them at some time in the clip, and the ground is
+    outside the direction of the sunset, where forest_cover allows, the camera sees them at some time in the clip, and the ground is
     not steeper than 60°. Returns points, variants, yaws and scales."""
     rng = random.Random(SEED + 3)  # its own generator, so the scatter of rocks stays put
     cam_kd = camera_kd(cam_path)
@@ -1716,6 +1720,10 @@ def forest_points(road, cam_path):
             x = (i + rng.random()) * FOREST_SPACING
             y = (j + rng.random()) * FOREST_SPACING
             if math.hypot(x, y) > FOREST_RADIUS or road.distance(x, y)[1] < 10.0:
+                continue
+            # Keep the notch towards the setting sun open: firs there shade the haze and hide
+            # the glow round the sun.
+            if away_from_sun(x, y) < 0.6:
                 continue
             if rng.random() < forest_cover(x, y, cam_kd.find((x, y, 0.0))[2]) ** 2:
                 candidates.append((x, y, ground_height(road, x, y)))
@@ -1857,10 +1865,12 @@ def random_value(nodes, kind, lo, hi, seed):
     return socket(node.outputs, "Value", sock)
 
 
-def build_grass(mats, coll, terrain, paved, rng):
+def build_grass(mats, coll, terrain, paved, cam, rng):
     """Grass clumps instanced by geometry nodes over the terrain, with the density taken from
     the terrain attribute 'grass_density'. Clumps rooted under the paved objects (road and
-    gutter) are removed: the terrain grid is too coarse for the density to stop at their edges."""
+    gutter) are removed: the terrain grid is too coarse for the density to stop at their edges.
+    Drawing the clumps took most of the EEVEE render time, so each frame keeps only those near
+    the camera's view, thinned with distance from the camera."""
     clumps = bpy.data.collections.new("GrassClumps")  # not linked to the scene: instanced only
     for k in range(GRASS_CLUMPS):
         clumps.objects.link(bpy.data.objects.new(f"GrassClump.{k}", grass_clump(rng, mats["blades"])))
@@ -1895,6 +1905,43 @@ def build_grass(mats, coll, terrain, paved, rng):
     links.new(points.outputs['Points'], unpaved.inputs['Geometry'])
     # The terrain lies up to GUTTER_SINK below the paving, less where the grid interpolates up.
     links.new(math_node(tree, 'LESS_THAN', proximity.outputs['Distance'], GUTTER_SINK + 0.02), unpaved.inputs['Selection'])
+
+    # Per frame, keep only the clumps in or near the camera's view, and fewer, larger clumps
+    # with distance from the camera: about (GRASS_THIN / d)² of them, scaled up to cover the
+    # same ground. A clump that is about to be thinned out shrinks first, so none pops.
+    camera = nodes.new('GeometryNodeObjectInfo')
+    camera.inputs['Object'].default_value = cam
+    to_camera = nodes.new('FunctionNodeInvertMatrix')
+    links.new(camera.outputs['Transform'], to_camera.inputs['Matrix'])
+    local = nodes.new('FunctionNodeTransformPoint')
+    links.new(nodes.new('GeometryNodeInputPosition').outputs['Position'], local.inputs['Vector'])
+    links.new(to_camera.outputs['Matrix'], local.inputs['Transform'])
+    xyz = nodes.new('ShaderNodeSeparateXYZ')
+    links.new(local.outputs['Vector'], xyz.inputs[0])
+    depth = math_node(tree, 'MULTIPLY', xyz.outputs['Z'], -1.0)  # the camera looks along -Z
+    visible = math_node(tree, 'GREATER_THAN', depth, -GRASS_VIEW_MARGIN)
+    for axis, half in (('X', GRASS_VIEW_HALF[0]), ('Y', GRASS_VIEW_HALF[1])):
+        reach = math_node(tree, 'MULTIPLY_ADD', depth, half)
+        reach.node.inputs[2].default_value = GRASS_VIEW_MARGIN
+        inside = math_node(tree, 'LESS_THAN', math_node(tree, 'SUBTRACT', math_node(
+            tree, 'ABSOLUTE', xyz.outputs[axis], 0.0), reach), 0.0)
+        visible = math_node(tree, 'MULTIPLY', visible, inside)
+    span = nodes.new('ShaderNodeVectorMath')
+    span.operation = 'LENGTH'
+    links.new(local.outputs['Vector'], span.inputs[0])
+    keep = math_node(tree, 'MINIMUM', math_node(tree, 'POWER', math_node(
+        tree, 'DIVIDE', GRASS_THIN, math_node(tree, 'MAXIMUM', span.outputs['Value'], 0.1)), 2.0), 1.0)
+    room = math_node(tree, 'SUBTRACT', keep, random_value(nodes, 'FLOAT', 0.0, 1.0, 6))  # > 0: kept
+    shown = math_node(tree, 'MULTIPLY', visible, math_node(tree, 'GREATER_THAN', room, 0.0))
+    culled = nodes.new('GeometryNodeDeleteGeometry')
+    culled.domain = 'POINT'
+    links.new(unpaved.outputs['Geometry'], culled.inputs['Geometry'])
+    links.new(math_node(tree, 'LESS_THAN', shown, 0.5), culled.inputs['Selection'])
+    grow = math_node(tree, 'MINIMUM', math_node(tree, 'DIVIDE', room, math_node(tree, 'MULTIPLY', keep, 0.3)), 1.0)
+    spread = math_node(tree, 'MINIMUM', math_node(tree, 'INVERSE_SQRT', keep, 0.0), GRASS_THIN_SCALE)
+    scale = math_node(tree, 'MULTIPLY', math_node(tree, 'MULTIPLY', grow, spread),
+                      random_value(nodes, 'FLOAT', 0.6, 1.4, 3))
+
     variants = nodes.new('GeometryNodeCollectionInfo')
     variants.inputs['Collection'].default_value = clumps
     variants.inputs['Separate Children'].default_value = True
@@ -1909,11 +1956,11 @@ def build_grass(mats, coll, terrain, paved, rng):
     rotation = lean_downwind(tree, yaw.outputs['Vector'], math_node(tree, 'MULTIPLY', wind, GRASS_LEAN))
     instances = nodes.new('GeometryNodeInstanceOnPoints')
     instances.inputs['Pick Instance'].default_value = True
-    links.new(unpaved.outputs['Geometry'], instances.inputs['Points'])
+    links.new(culled.outputs['Geometry'], instances.inputs['Points'])
     links.new(variants.outputs['Instances'], instances.inputs['Instance'])
     links.new(random_value(nodes, 'INT', 0, GRASS_CLUMPS - 1, 2), instances.inputs['Instance Index'])
     links.new(rotation, instances.inputs['Rotation'])
-    links.new(random_value(nodes, 'FLOAT', 0.6, 1.4, 3), instances.inputs['Scale'])
+    links.new(scale, instances.inputs['Scale'])
     out = nodes.new('NodeGroupOutput')
     links.new(instances.outputs['Instances'], out.inputs[0])
 
@@ -3166,7 +3213,7 @@ def main():
     build_barn(road, mats, env)
     scatter_trees(road, env, rng, ride_x, cam_path)
     scatter_rocks(road, mats, env, rng, ride_x)
-    build_grass(mats, env, terrain, (road_obj, gutter), rng)
+    build_grass(mats, env, terrain, (road_obj, gutter), cam, rng)
     build_world(scene)
     build_haze(env)
     configure_render(scene)
