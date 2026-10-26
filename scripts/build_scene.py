@@ -690,11 +690,96 @@ def grass_blade_material():
     return mat
 
 
+STITCH = 0.0015  # size of one cross stitch of the handkerchief embroidery
+
+
+def stitch_image(name, cells):
+    """Packed image of white cross stitches on black: 8 pixels per cell of the boolean grid
+    cells (first row at the bottom). The image repeats seamlessly."""
+    size = 8
+    p = np.arange(size) + 0.5
+    x, y = np.meshgrid(p, p)
+    cross = np.maximum(np.clip(1.6 - np.abs(x - y), 0, 1), np.clip(1.6 - np.abs(x + y - size), 0, 1))
+    value = np.kron(np.asarray(cells, dtype=float), cross)
+    height, width = value.shape
+    img = bpy.data.images.new(name, width, height, alpha=False)
+    img.colorspace_settings.name = 'Non-Color'
+    rgba = np.ones((height, width, 4), dtype=np.float32)
+    rgba[..., :3] = value[..., None]
+    img.pixels.foreach_set(rgba.ravel())
+    img.pack()
+    return img
+
+
+def star_motif(n=20):
+    """Balkan eight-pointed star, split into quarters round a centre stitch, with a small
+    hollow diamond at the tile corners, between the stars."""
+    cells = np.zeros((n, n), bool)
+    c = n // 2
+    for i in range(n):
+        for j in range(n):
+            x, y = j - c, i - c
+            star = abs(x) + abs(y) <= 8 or max(abs(x), abs(y)) <= 5
+            cut = (x == 0 or y == 0 or abs(x) + abs(y) == 3) and (x, y) != (0, 0)
+            corner = abs((j + c) % n - c) + abs((i + c) % n - c) == 2
+            cells[i, j] = (star and not cut) or corner
+    return cells
+
+
+def teeth_border(n=6):
+    """Hem border: a line of stitches along the hem and a row of 'wolf's teeth' triangles."""
+    cells = np.zeros((n, n), bool)
+    cells[0, :] = True
+    for j in range(n):
+        cells[2:2 + n // 2 - abs(j - n // 2), j] = True
+    return cells
+
+
 def kerchief_material():
-    """Red cotton: a fine plain weave as bump, with sheen at grazing angles."""
+    """Red cotton with white Balkan cross-stitch embroidery: eight-pointed stars over the
+    triangle, wolf's teeth along the hem and a line of stitches along the top edge. The
+    embroidery is placed by the cloth coordinates (metres) that build_kerchief stores on the
+    mesh. A fine plain weave gives the bump, with sheen at grazing angles."""
     mat = make_material("Kerchief", (0.28, 0.008, 0.012), 0.9,
                         inputs={"Sheen Weight": 0.8, "Sheen Roughness": 0.35, "Sheen Tint": (1.0, 0.5, 0.5, 1.0)})
     nt = mat.node_tree
+    bsdf = principled_node(mat)
+
+    def attribute(name):
+        node = nt.nodes.new('ShaderNodeAttribute')
+        node.attribute_name = name
+        return node.outputs['Fac']
+
+    def stitches(img, u, v, repeat, u_offset=0.0, v_offset=0.0):
+        """The image sampled at cloth coordinates u, v (metres), repeating every repeat metres,
+        with its lower left corner at (u_offset, v_offset)."""
+        uv = nt.nodes.new('ShaderNodeCombineXYZ')
+        nt.links.new(math_node(nt, 'DIVIDE', math_node(nt, 'SUBTRACT', u, u_offset), repeat), uv.inputs['X'])
+        nt.links.new(math_node(nt, 'DIVIDE', math_node(nt, 'SUBTRACT', v, v_offset), repeat), uv.inputs['Y'])
+        tex = nt.nodes.new('ShaderNodeTexImage')
+        tex.image = img
+        nt.links.new(uv.outputs['Vector'], tex.inputs['Vector'])
+        return tex.outputs['Color']
+
+    def between(value, lo, hi):
+        return math_node(nt, 'MULTIPLY', math_node(nt, 'GREATER_THAN', value, lo), math_node(nt, 'LESS_THAN', value, hi))
+
+    # The centre tooth and the centre column of stars sit on the front centre line (u = 0). The
+    # star tiles start 2 stitches above the band's lower edge, so the corner diamonds there are
+    # masked and the first row of stars below the band is whole.
+    u, v, hem_u, hem_v = (attribute(n) for n in ("cloth_u", "cloth_v", "hem_u", "hem_v"))
+    border = math_node(nt, 'MULTIPLY', stitches(stitch_image("TeethBorder", teeth_border()), hem_u, hem_v, 6 * STITCH,
+                                                -3 * STITCH),
+                       math_node(nt, 'LESS_THAN', hem_v, 6 * STITCH))
+    line = math_node(nt, 'MULTIPLY', stitches(stitch_image("StitchLine", [[True]]), u, v, STITCH, 0.0, STITCH),
+                     between(v, STITCH, 2 * STITCH))
+    stars = math_node(nt, 'MULTIPLY', stitches(stitch_image("StarMotif", star_motif()), u, v, 20 * STITCH,
+                                               -10 * STITCH, KERCHIEF_BAND - 2 * STITCH),
+                      math_node(nt, 'MULTIPLY', math_node(nt, 'GREATER_THAN', v, KERCHIEF_BAND + STITCH),
+                                math_node(nt, 'GREATER_THAN', hem_v, 8 * STITCH)))
+    thread = math_node(nt, 'MAXIMUM', math_node(nt, 'MAXIMUM', border, line), stars)
+    nt.links.new(mix_colour(nt, thread, (0.28, 0.008, 0.012), (0.78, 0.75, 0.68)), bsdf.inputs['Base Color'])
+
     coord = nt.nodes.new('ShaderNodeTexCoord')
     weave = []
     for axis in ('X', 'Y'):
@@ -705,8 +790,10 @@ def kerchief_material():
         weave.append(threads.outputs['Fac'])
     bump = nt.nodes.new('ShaderNodeBump')
     bump.inputs['Strength'].default_value = 0.15
-    nt.links.new(math_node(nt, 'MULTIPLY', weave[0], weave[1]), bump.inputs['Height'])
-    nt.links.new(bump.outputs['Normal'], principled_node(mat).inputs['Normal'])
+    # The embroidery thread stands up from the weave.
+    height = math_node(nt, 'ADD', math_node(nt, 'MULTIPLY', weave[0], weave[1]), math_node(nt, 'MULTIPLY', thread, 2.0))
+    nt.links.new(height, bump.inputs['Height'])
+    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
     return mat
 
 
@@ -1695,21 +1782,40 @@ def build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top):
             normal = bvh.find_nearest(p)[1]
             column[i] = p + normal * 0.004 * hang * (i / (rows - 1)) * math.sin(9 * phi)
 
+    # Cloth coordinates in metres for the embroidery: along the top edge, down from it, along
+    # the hem and up from it. The first column is repeated at the end, so the coordinates along
+    # the edges do not wrap round at the back (under the knot).
+    # Along the edges, the coordinates start at the front centre (column columns // 2, phi = 0).
+    grid.append(grid[0])
+    along_top = np.concatenate(([0.0], np.cumsum([(b[0] - a[0]).length for a, b in zip(grid, grid[1:])])))
+    along_hem = np.concatenate(([0.0], np.cumsum([(b[-1] - a[-1]).length for a, b in zip(grid, grid[1:])])))
+    along_top -= along_top[columns // 2]
+    along_hem -= along_hem[columns // 2]
+    coords = {name: [] for name in ("cloth_u", "cloth_v", "hem_u", "hem_v")}
+    for j, column in enumerate(grid):
+        down = np.concatenate(([0.0], np.cumsum([(b - a).length for a, b in zip(column, column[1:])])))
+        coords["cloth_u"] += [along_top[j]] * rows
+        coords["cloth_v"] += list(down)
+        coords["hem_u"] += [along_hem[j]] * rows
+        coords["hem_v"] += list(down[-1] - down)
+
     bm = bmesh.new()
     verts = [[bm.verts.new(p) for p in column] for column in grid]
-    for j in range(columns):
+    for a, b in zip(verts, verts[1:]):
         for i in range(rows - 1):
-            a, b = verts[j], verts[(j + 1) % columns]
             bm.faces.new((a[i], b[i], b[i + 1], a[i + 1]))
     back = top - axis * KERCHIEF_BAND * 0.5
     location, normal, _, _ = bvh.ray_cast(back, -front, 0.2)
     knot = Matrix.Translation(location + normal * (KERCHIEF_LIFT + 0.004)) @ S(0.006, 0.009, 0.007)
-    bmesh.ops.create_uvsphere(bm, u_segments=12, v_segments=8, radius=1.0, matrix=knot)
+    knot_verts = bmesh.ops.create_uvsphere(bm, u_segments=12, v_segments=8, radius=1.0, matrix=knot)['verts']
     for face in bm.faces:
         face.smooth = True
     mesh = bpy.data.meshes.new("Kerchief")
     bm.to_mesh(mesh)
     bm.free()
+    # The knot is plain: far from the hem and above the band, so no embroidery region covers it.
+    for name, value in (("cloth_u", 0.0), ("cloth_v", 0.0), ("hem_u", 0.0), ("hem_v", 1.0)):
+        set_attribute(mesh, name, coords[name] + [value] * len(knot_verts))
     mesh.materials.append(mats["kerchief"])
     cloth = link(bpy.data.objects.new("Kerchief", mesh), coll, cat_rig)
     skin(cloth, cat_rig, smoothing=10)
