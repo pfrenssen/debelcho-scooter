@@ -5,6 +5,9 @@ the shot.
 
 ## Cat
 
+- **Attached ears.** The ears look detached from the head. They are separate objects that
+  rotate for the twitches and the wind flutter; blend them into the head so no gap or seam shows
+  at the base in any pose.
 - **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
   and tail), add clumping and some flyaway strands, and use the Principled Hair BSDF for Cycles
   renders.
