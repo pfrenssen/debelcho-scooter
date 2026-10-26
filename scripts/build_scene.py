@@ -625,6 +625,7 @@ def build_materials():
         "strands": strand_material(),
         "ear_tufts": make_material("EarTufts", (0.12, 0.115, 0.11), 0.4),  # pale hairs inside the ears
     }
+    cycles_hair(m["ear_tufts"], 0.55, 0.3)
     return m
 
 
@@ -1096,7 +1097,33 @@ def strand_material():
     ramp_colors(ramp, (0.005, 0.005, 0.006), (0.035, 0.034, 0.036), (0.3, 1.0))
     nt.links.new(info.outputs['Intercept'], ramp.inputs['Fac'])
     nt.links.new(ramp.outputs['Color'], principled_node(mat).inputs['Base Color'])
+    # Less melanin towards the tips, as the grey of the EEVEE ramp.
+    tips = nt.nodes.new('ShaderNodeMapRange')
+    tips.inputs['From Min'].default_value = 0.3
+    tips.inputs['To Min'].default_value = 0.97
+    tips.inputs['To Max'].default_value = 0.88
+    nt.links.new(info.outputs['Intercept'], tips.inputs['Value'])
+    cycles_hair(mat, tips.outputs['Result'], 0.25)
     return mat
+
+
+def cycles_hair(mat, melanin, roughness):
+    """Give a strand material a Principled Hair BSDF for Cycles, so the fur shows its sheen and a
+    rim against the light; the Principled BSDF stays for EEVEE, which renders the hair BSDF
+    black. melanin is a value or a socket."""
+    nt = mat.node_tree
+    for out in (n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL'):
+        out.target = 'EEVEE'
+    hair = nt.nodes.new('ShaderNodeBsdfHairPrincipled')
+    hair.parametrization = 'MELANIN'
+    if isinstance(melanin, float):
+        hair.inputs['Melanin'].default_value = melanin
+    else:
+        nt.links.new(melanin, hair.inputs['Melanin'])
+    set_inputs(hair, {"Melanin Redness": 0.08, "Roughness": roughness, "Radial Roughness": 0.4, "Coat": 0.1})
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    out.target = 'CYCLES'
+    nt.links.new(hair.outputs[0], out.inputs['Surface'])
 
 
 # --------------------------------------------------------------------------- environment
