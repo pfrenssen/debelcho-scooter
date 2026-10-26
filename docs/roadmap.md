@@ -24,15 +24,6 @@ the shot.
   trunks and fluttering branches need per-vertex deformation; doing that as shader displacement
   made the Radeon 680M time out and reset during animation renders.
 - **Wheel interaction.** The scooter pushes the verge grass aside and raises a faint dust trail.
-- **Road edges.** The asphalt ends in a clean straight cut against the grass. Model the edges
-  on an Austrian alpine pass road (reference photo: `~/Downloads/gettyimages-1195083867-612x612.jpg`,
-  not in the repository):
-  - on the valley side, a row of rough-hewn granite guard stones, about 0.6 m tall and 0.3 m
-    square, every 2 to 3 m, each set slightly askew, replacing the wire fence;
-  - on the uphill side, a low kerb or shallow concrete drainage gutter, with an occasional stone
-    drain inlet;
-  - a solid white edge line a few centimetres in from each edge, worn like the centre line;
-  - a ragged asphalt edge with a dark rim of dirt where the grass grows over it.
 - **Road detail.** A gravel shoulder, worn tyre tracks, repair patches and a slight crown.
 - **Terrain erosion.** Run a hydraulic erosion pass on the near height grid for gullies, ridges
   and smoother valley floors.

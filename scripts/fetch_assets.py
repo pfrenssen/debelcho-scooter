@@ -15,7 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TEXTURES = ROOT / "assets" / "textures"
 MODELS = ROOT / "assets" / "models"
-TEXTURE_ASSETS = ["grass_ground", "dry_ground_01", "aerial_rocks_02", "asphalt_02"]
+TEXTURE_ASSETS = ["grass_ground", "dry_ground_01", "aerial_rocks_02", "asphalt_02", "rock_boulder_dry",
+                  "dirty_concrete", "brown_mud_dry"]
 MODEL_ASSETS = ["fir_tree_01"]
 MAPS = {"Diffuse": "diff", "nor_gl": "nor_gl", "Rough": "rough"}
 TEXTURE_RESOLUTION = "2k"

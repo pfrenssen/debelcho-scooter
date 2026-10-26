@@ -41,6 +41,17 @@ ROAD_HALF_WIDTH = 1.3
 ROAD_BLEND = 3.5
 ROAD_SINK = 0.06  # terrain under the road sits this far below the road surface
 ROAD_STEP = 0.25
+# Road edges after an Austrian pass road: a concrete drainage gutter along the left edge (mostly
+# uphill), granite guard stones on the right where the ground there falls away.
+GUTTER_WIDTH = 0.44  # dish and outer kerb lip
+GUTTER_DISH = 0.38
+GUTTER_DEPTH = 0.04
+GUTTER_SHOULDER = 0.3  # level ground beyond the gutter before the terrain blends in
+GUTTER_SINK = 0.1  # the terrain under the gutter sits this far below the road surface, clear of the dish
+EDGE_LINE_INSET = 0.11  # from the road edge to the middle of the edge line
+STONE_SIZE = (0.3, 0.3, 0.6)  # above the ground
+STONE_OFFSET = 0.45  # from the road edge to the middle of a stone
+STONE_DROP = 0.4  # metres the ground must fall within 4 m of the right edge for guard stones
 GRASS_DENSITY = 160.0  # clumps per square metre at the road verge
 GRASS_CLUMPS = 6  # clump variants
 # Hay barn in the Kleinwalsertal style on the slope right of the road, a background detail.
@@ -264,6 +275,11 @@ class Road:
             self.kd.insert((p.x, p.y, 0.0), i)
         self.kd.balance()
         self.bumps = []
+        # Distance from the centre line to the right edge, where the asphalt has crumbled away
+        # in chips up to 6 cm deep. The left edge is laid straight against the gutter.
+        self.right_edge = [ROAD_HALF_WIDTH - min(max(0.025 + 0.04 * noise.noise(Vector((s / 0.8, 0.0, 4.1)))
+                                                     + 0.02 * noise.noise(Vector((s / 0.3, 0.0, 6.7))), 0.0), 0.06)
+                           for s in self.cum]
 
     def bump(self, s):
         """Height of the road surface above the smooth centre line at arc length s."""
@@ -290,13 +306,20 @@ class Road:
         _, idx, dist = self.kd.find((x, y, 0.0))
         return idx, dist
 
-    def terrain_height(self, x, y):
+    def edge_distance(self, x, y, shoulder=0.0):
+        """Nearest centre line index, the distance beyond the road edge, or on the left beyond
+        the gutter and the given shoulder (negative on the road), and whether it is the left."""
         idx, dist = self.distance(x, y)
+        left = (Vector((x, y, 0.0)) - self.points[idx]).dot(self.normals[idx]) > 0.0
+        return idx, dist - ROAD_HALF_WIDTH - (GUTTER_WIDTH + shoulder if left else 0.0), left
+
+    def terrain_height(self, x, y):
+        idx, edge, left = self.edge_distance(x, y, GUTTER_SHOULDER)
         base = base_height(x, y)
-        if dist >= ROAD_HALF_WIDTH + ROAD_BLEND:
+        if edge >= ROAD_BLEND:
             return base
-        road = self.points[idx].z - ROAD_SINK
-        return lerp(road, base, smoothstep(ROAD_HALF_WIDTH, ROAD_HALF_WIDTH + ROAD_BLEND, dist))
+        road = self.points[idx].z - (GUTTER_SINK if left else ROAD_SINK)
+        return lerp(road, base, smoothstep(0.0, ROAD_BLEND, edge))
 
 
 # --------------------------------------------------------------------------- helpers
@@ -356,6 +379,44 @@ class MeshBuilder:
         m = self.to_local @ Matrix.Translation(center) @ (rot or Matrix()) @ S(*radii)
         res = bmesh.ops.create_uvsphere(self.bm, u_segments=segments, v_segments=rings, radius=1.0, matrix=m)
         self._finish(res['verts'], mat, True)
+
+    def hewn_box(self, matrix, size, rng, mat=0, bury=0.0, cuts=2, jitter=0.01, taper=0.08):
+        """Rough-hewn stone block standing on the matrix origin along +Z, bury of its height
+        below the origin: subdivided faces with jittered vertices, narrowing towards the top,
+        with knocked-off top edges. UVs are projected in metres onto each face's main axis, and
+        the vertex attribute 'ground' is the height above the ground."""
+        bm = self.bm
+        uv = bm.loops.layers.uv.get("UVMap") or bm.loops.layers.uv.new("UVMap")
+        ground = bm.verts.layers.float.get("ground") or bm.verts.layers.float.new("ground")
+        res = bmesh.ops.create_cube(bm, size=1.0)
+        res = bmesh.ops.subdivide_edges(bm, edges=list({e for v in res['verts'] for e in v.link_edges}), cuts=cuts,
+                                        use_grid_fill=True)
+        # The subdivided cube: everything linked to the vertices the subdivision added.
+        verts, todo = set(), [g for g in res['geom'] if isinstance(g, bmesh.types.BMVert)]
+        while todo:
+            v = todo.pop()
+            if v not in verts:
+                verts.add(v)
+                todo += [e.other_vert(v) for e in v.link_edges]
+        local = {}
+        for v in verts:
+            x, y, t = v.co.x, v.co.y, v.co.z + 0.5
+            narrow = 1.0 - taper * t
+            co = Vector((x * size[0] * narrow, y * size[1] * narrow, t * size[2] - bury))
+            if t == 1.0 and max(abs(x), abs(y)) == 0.5:
+                co.z -= 0.025
+            co += Vector((rng.gauss(0, jitter), rng.gauss(0, jitter), rng.gauss(0, jitter)))
+            local[v] = co
+            v[ground] = co.z
+            v.co = self.to_local @ matrix @ co
+        for face in {f for v in verts for f in v.link_faces}:
+            n = (local[face.verts[1]] - local[face.verts[0]]).cross(local[face.verts[2]] - local[face.verts[0]])
+            axis = max(range(3), key=lambda k: abs(n[k]))
+            u_axis, v_axis = [k for k in range(3) if k != axis]
+            for loop in face.loops:
+                co = local[loop.vert]
+                loop[uv].uv = (co[u_axis], co[v_axis])
+        self._finish(verts, mat, False)
 
     def ico(self, matrix, radius, mat=0, subdiv=1):
         res = bmesh.ops.create_icosphere(self.bm, subdivisions=subdiv, radius=radius, matrix=self.to_local @ matrix)
@@ -518,8 +579,11 @@ def build_materials():
         "asphalt": asphalt_material(),
         "alpine": alpine_material(),
         "paint": road_paint_material(),
-        "wood": make_material("FenceWood", (0.20, 0.12, 0.06), 0.8),
-        "wire": make_material("FenceWire", (0.4, 0.4, 0.42), 0.4, metallic=1.0),
+        "granite": granite_material(),
+        "gutter": gutter_material(),
+        "verge_dirt": verge_dirt_material(),
+        "iron": make_material("GrateIron", (0.035, 0.03, 0.027), 0.6, metallic=0.7),
+        "pit": make_material("DrainPit", (0.003, 0.003, 0.003), 1.0),
         # Weathered logs vary from dark brown to silvery grey-brown; the slats and boards are paler.
         "logs": [textured_material(f"BarnLogs.{k}", low, high, 1.5, 20.0, 0.85) for k, (low, high) in enumerate((
             ((0.025, 0.017, 0.012), (0.06, 0.042, 0.03)),
@@ -701,6 +765,77 @@ def asphalt_material():
     uv = nt.nodes.new('ShaderNodeUVMap')
     uv.uv_map = "UVMap"
     apply_texture(nt, principled_node(mat), texture_set(nt, "asphalt_02", 3.0, uv.outputs['UV']))
+    return mat
+
+
+def stretched_noise(nt, vector, scale, detail=5.0):
+    """Noise Fac stretched from its usual ±0.06 round 0.5 to roughly 0..1."""
+    tex = nt.nodes.new('ShaderNodeTexNoise')
+    tex.inputs['Scale'].default_value = scale
+    tex.inputs['Detail'].default_value = detail
+    nt.links.new(vector, tex.inputs['Vector'])
+    out = math_node(nt, 'MULTIPLY_ADD', tex.outputs['Fac'], 4.0)
+    out.node.inputs[2].default_value = -1.5
+    return out
+
+
+def granite_material():
+    """Weathered grey granite, darker towards the ground where rain splashes soil onto the
+    stone; vertex attribute 'ground' is the height above the ground."""
+    mat = make_material("Granite", (0.2, 0.2, 0.19), 0.8)
+    nt = mat.node_tree
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.uv_map = "UVMap"
+    colour, rough, normal = texture_set(nt, "rock_boulder_dry", 1.8, uv.outputs['UV'])
+    # rock_boulder_dry is a pale limestone grey; darken and cool it towards granite.
+    colour = mix_colour(nt, 1.0, colour, (0.5, 0.5, 0.52), 'MULTIPLY')
+    ground = nt.nodes.new('ShaderNodeAttribute')
+    ground.attribute_name = "ground"
+    splash = math_node(nt, 'ADD', ground.outputs['Fac'], math_node(
+        nt, 'MULTIPLY', stretched_noise(nt, uv.outputs['UV'], 8.0), 0.08))
+    colour = mix_colour(nt, smooth_range(nt, splash, 0.2, 0.02), colour, (0.04, 0.035, 0.03))
+    apply_texture(nt, principled_node(mat), [colour, rough, normal])
+    return mat
+
+
+def gutter_material():
+    """Precast concrete gutter sections a metre long, with dark joints and silt in the bottom
+    of the dish. UV u runs along the road and v across the gutter from the road edge, in metres."""
+    mat = make_material("Gutter", (0.3, 0.3, 0.28), 0.85)
+    nt = mat.node_tree
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.uv_map = "UVMap"
+    split = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(uv.outputs['UV'], split.inputs[0])
+    colour, rough, normal = texture_set(nt, "dirty_concrete", 3.0, uv.outputs['UV'])
+    colour = mix_colour(nt, 1.0, colour, (0.75, 0.75, 0.72), 'MULTIPLY')
+    dish = math_node(nt, 'ABSOLUTE', math_node(nt, 'SUBTRACT', split.outputs['Y'], GUTTER_DISH / 2), 0.0)
+    silt = math_node(nt, 'MULTIPLY', smooth_range(nt, dish, 0.12, 0.02),
+                     smooth_range(nt, stretched_noise(nt, uv.outputs['UV'], 2.5), 0.3, 0.7))
+    joint = smooth_range(nt, math_node(nt, 'PINGPONG', split.outputs['X'], 0.5), 0.008, 0.004)
+    colour = mix_colour(nt, math_node(nt, 'MAXIMUM', silt, joint), colour, (0.035, 0.03, 0.025))
+    rough = mix_colour(nt, silt, rough, (1.0, 1.0, 1.0))
+    apply_texture(nt, principled_node(mat), [colour, rough, normal])
+    return mat
+
+
+def verge_dirt_material():
+    """Soil washed over the crumbled right edge of the asphalt and the bare strip beside it,
+    under the verge grass. Vertex attribute 'fade' is 1 inside the strip and 0 at its borders;
+    noise frays the borders."""
+    mat = make_material("VergeDirt", (0.05, 0.04, 0.03), 0.95)
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.uv_map = "UVMap"
+    colour, rough, normal = texture_set(nt, "brown_mud_dry", 1.3, uv.outputs['UV'])
+    colour = mix_colour(nt, 1.0, colour, (0.45, 0.42, 0.4), 'MULTIPLY')
+    apply_texture(nt, bsdf, [colour, rough, normal])
+    fade = nt.nodes.new('ShaderNodeAttribute')
+    fade.attribute_name = "fade"
+    frayed = math_node(nt, 'ADD', fade.outputs['Fac'], math_node(
+        nt, 'MULTIPLY', math_node(nt, 'SUBTRACT', stretched_noise(nt, uv.outputs['UV'], 7.0), 0.5), 0.6))
+    nt.links.new(smooth_range(nt, frayed, 0.35, 0.5), bsdf.inputs['Alpha'])
     return mat
 
 
@@ -1071,17 +1206,20 @@ def set_attribute(mesh, name, values):
 def grass_density(road, x, y, ride_x):
     """Relative grass density: full on the verge, thinning away from the road and outside the
     stretch the camera sees."""
-    edge = road.distance(x, y)[1] - ROAD_HALF_WIDTH
+    edge = road.edge_distance(x, y)[1]
     along = smoothstep(ride_x[0] - 18.0, ride_x[0] - 8.0, x) * (1.0 - smoothstep(ride_x[1] + 10.0, ride_x[1] + 20.0, x))
     return along * smoothstep(0.05, 0.3, edge) * lerp(1.0, 0.06, smoothstep(2.0, 20.0, edge))
 
 
 def build_road(road, mats, coll):
+    """Asphalt with skirts running down into the ground on both sides, the right edge crumbled
+    (Road.right_edge), and the road markings. Returns the asphalt object."""
     w = ROAD_HALF_WIDTH
-    verts, faces = [], []
-    for p, nrm in zip(road.points, road.normals):
-        low = Vector((0, 0, -0.25))
-        verts += [p + nrm * (w + 0.15) + low, p + nrm * w, p - nrm * w, p - nrm * (w + 0.15) + low]
+    verts, faces, uvs = [], [], []
+    low = Vector((0, 0, -0.25))
+    for p, nrm, s, e in zip(road.points, road.normals, road.cum, road.right_edge):
+        verts += [p + nrm * (w + 0.15) + low, p + nrm * w, p - nrm * e, p - nrm * (e + 0.15) + low]
+        uvs += [(s, w + 0.15), (s, w), (s, -e), (s, -e - 0.15)]
     for i in range(len(road.points) - 1):
         a, b = 4 * i, 4 * (i + 1)
         for k in range(3):
@@ -1089,39 +1227,181 @@ def build_road(road, mats, coll):
     mesh = bpy.data.meshes.new("Road")
     mesh.from_pydata(verts, [], faces)
     mesh.materials.append(mats["asphalt"])
-    across = (w + 0.15, w, -w, -w - 0.15)
-    set_uvs(mesh, [(s, v) for s in road.cum for v in across])
-    link(bpy.data.objects.new("Road", mesh), coll)
+    set_uvs(mesh, uvs)
+    road_obj = link(bpy.data.objects.new("Road", mesh), coll)
 
-    # Dashed centre line: 0.9 m dashes every 2 m. The paint wears most on bends, where cars cut
-    # across the line, and varies slowly along the road.
+    # Dashed centre line, 0.9 m dashes every 2 m, and solid edge lines. The centre line wears
+    # most on bends, where cars cut across it, the edge lines on the inside of bends, and all
+    # of them vary slowly along the road.
     n = len(road.points)
     headings = [math.atan2(t.y, t.x) for t in road.tangents]
-    wear = []
+    wear, wear_left, wear_right = [], [], []
     for i in range(n):
         a, b = max(i - 4, 0), min(i + 4, n - 1)
-        bend = abs(wrap_angle(headings[b] - headings[a])) / (road.cum[b] - road.cum[a])
+        turn = wrap_angle(headings[b] - headings[a]) / (road.cum[b] - road.cum[a])  # positive to the left
         drift = noise.noise(Vector((road.cum[i] / 6.0, 0.0, 2.9)))
-        wear.append(min(max(0.4 + 0.3 * smoothstep(0.02, 0.1, bend) + 0.3 * drift, 0.0), 1.0))
+        wear.append(min(max(0.4 + 0.3 * smoothstep(0.02, 0.1, abs(turn)) + 0.3 * drift, 0.0), 1.0))
+        for side, values in ((1.0, wear_left), (-1.0, wear_right)):
+            drift = noise.noise(Vector((road.cum[i] / 8.0, side * 3.0, 5.1)))
+            values.append(min(max(0.25 + 0.4 * smoothstep(0.02, 0.1, side * turn) + 0.3 * drift, 0.0), 1.0))
     verts, faces, uvs, vert_wear = [], [], [], []
-    dash, period = int(0.9 / ROAD_STEP), int(2.0 / ROAD_STEP)
     up = Vector((0, 0, 0.004))
-    for start in range(0, n - dash, period):
+
+    def stripe(indices, offset, wear):
         base = len(verts)
-        for i in range(start, start + dash + 1):
+        for i in indices:
             p, nrm = road.points[i] + up, road.normals[i]
-            verts += [p + nrm * PAINT_HALF_WIDTH, p - nrm * PAINT_HALF_WIDTH]
-            uvs += [(road.cum[i], PAINT_HALF_WIDTH), (road.cum[i], -PAINT_HALF_WIDTH)]
-            vert_wear += [wear[i]] * 2
-        for k in range(dash):
+            for v in (PAINT_HALF_WIDTH, -PAINT_HALF_WIDTH):
+                verts.append(p + nrm * (offset + v))
+                uvs.append((road.cum[i], v))
+                vert_wear.append(wear[i])
+        for k in range(len(indices) - 1):
             faces.append((base + 2 * k, base + 2 * k + 2, base + 2 * k + 3, base + 2 * k + 1))
+
+    dash, period = int(0.9 / ROAD_STEP), int(2.0 / ROAD_STEP)
+    for start in range(0, n - dash, period):
+        stripe(range(start, start + dash + 1), 0.0, wear)
+    stripe(range(n), w - EDGE_LINE_INSET, wear_left)
+    stripe(range(n), EDGE_LINE_INSET - w, wear_right)
     mesh = bpy.data.meshes.new("RoadLine")
     mesh.from_pydata(verts, [], faces)
     mesh.materials.append(mats["paint"])
     set_uvs(mesh, uvs)
     set_attribute(mesh, "wear", vert_wear)
-    print("road paint wear 5/50/95 %:", [round(sorted(wear)[int(n * p)], 2) for p in (0.05, 0.5, 0.95)])
+    for name, values in (("centre", wear), ("left edge", wear_left), ("right edge", wear_right)):
+        print(f"road paint wear 5/50/95 % {name}:", [round(sorted(values)[int(n * p)], 2) for p in (0.05, 0.5, 0.95)])
     link(bpy.data.objects.new("RoadLine", mesh), coll)
+    return road_obj
+
+
+def ground_probe(terrain):
+    """Height of the terrain mesh as rendered, which differs from Road.terrain_height between
+    grid vertices."""
+    bvh = BVHTree.FromObject(terrain, bpy.context.evaluated_depsgraph_get())
+
+    def height(x, y):
+        hit = bvh.ray_cast(Vector((x, y, 10000.0)), Vector((0, 0, -1)))[0]
+        return hit.z if hit else -1000.0
+    return height
+
+
+def build_gutter(road, mats, coll, ground):
+    """Precast concrete gutter along the left edge: a shallow dish a little below the asphalt,
+    and a low kerb lip on the outside whose outer face runs down into the ground."""
+    w = ROAD_HALF_WIDTH
+    steps = 8
+    profile = [(GUTTER_DISH * k / steps, -0.005 - GUTTER_DEPTH * math.sin(math.pi * k / steps)) for k in range(steps + 1)]
+    profile += [(GUTTER_DISH + 0.02, 0.02), (GUTTER_WIDTH, 0.02), (GUTTER_WIDTH + 0.02, -0.25)]
+    verts, faces, uvs = [], [], []
+    clearance = math.inf
+    for p, nrm, s in zip(road.points, road.normals, road.cum):
+        for u, dz in profile:
+            q = p + nrm * (w + u) + Vector((0, 0, dz))
+            verts.append(q)
+            uvs.append((s, u))
+            if u <= GUTTER_DISH:
+                clearance = min(clearance, q.z - ground(q.x, q.y))
+    m = len(profile)
+    for i in range(len(road.points) - 1):
+        a, b = m * i, m * (i + 1)
+        for k in range(m - 1):
+            faces.append((a + k, b + k, b + k + 1, a + k + 1))
+    print(f"gutter dish clearance above the terrain: {clearance * 100:.1f} cm")
+    mesh = bpy.data.meshes.new("Gutter")
+    mesh.from_pydata(verts, [], faces)
+    mesh.shade_smooth()
+    mesh.materials.append(mats["gutter"])
+    set_uvs(mesh, uvs)
+    return link(bpy.data.objects.new("Gutter", mesh), coll)
+
+
+def build_drains(road, mats, coll):
+    """Drain inlets in the gutter every 20 to 30 m: a cast-iron grate over a dark pit, with a
+    granite headwall set into the bank behind it."""
+    rng = random.Random(SEED + 1)  # its own generator, so the scatter of trees and rocks stays put
+    b = MeshBuilder()
+    middle = ROAD_HALF_WIDTH + GUTTER_DISH / 2
+    bottom = -0.005 - GUTTER_DEPTH
+    s = rng.uniform(5.0, 15.0)
+    while s < road.cum[-1] - 2.0:
+        p, tan, nrm = road.sample(s)
+        # The grate follows the gradient of the road (x along it, y to the left, z up from it);
+        # the headwall stands upright.
+        incline = Matrix((tan, nrm, tan.cross(nrm))).transposed().to_4x4()
+        frame = T(*p) @ incline
+        b.box(frame @ Vector((0.0, middle, bottom + 0.01 - 0.1)), (0.5, 0.3, 0.2), mat=2, rot=incline)
+        for k in range(13):
+            x = -0.21 + 0.035 * k
+            b.box(frame @ Vector((x, middle, bottom + 0.012)), (0.012, 0.28, 0.012), mat=1, rot=incline)
+        for y in (-0.14, 0.14):
+            b.box(frame @ Vector((0.0, middle + y, bottom + 0.012)), (0.46, 0.02, 0.014), mat=1, rot=incline)
+        lean = R(rng.uniform(-0.04, 0.04), 'Z') @ R(rng.uniform(-0.03, 0.03), 'X')
+        upright = T(*p) @ R(math.atan2(tan.y, tan.x), 'Z')
+        b.hewn_box(upright @ T(0.0, ROAD_HALF_WIDTH + GUTTER_WIDTH + 0.12, 0.0) @ lean, (0.7, 0.2, 0.35), rng,
+                   mat=0, bury=0.1, jitter=0.008)
+        s += rng.uniform(20.0, 30.0)
+    b.to_object("Drains", [mats["granite"], mats["iron"], mats["pit"]], coll)
+
+
+def build_verge_dirt(road, mats, coll, ground):
+    """Strip of soil over the crumbled right edge of the asphalt and beside it, 20 to 45 cm wide,
+    lying just above the rendered terrain."""
+    verts, faces, uvs, fade = [], [], [], []
+    for p, nrm, s, e in zip(road.points, road.normals, road.cum, road.right_edge):
+        reach = 0.32 + 0.12 * noise.noise(Vector((s / 1.1, 0.0, 5.3)))
+        for offset, f in ((-0.06, 0.0), (0.0, 0.7), (0.05, 1.0), (0.15, 1.0), (reach, 0.0)):
+            q = p - nrm * (e + offset)
+            q.z = p.z + 0.005 if offset <= 0.0 else ground(q.x, q.y) + 0.01
+            verts.append(q)
+            uvs.append((s, offset))
+            fade.append(f)
+    for i in range(len(road.points) - 1):
+        a, b = 5 * i, 5 * (i + 1)
+        for k in range(4):
+            faces.append((a + k, a + k + 1, b + k + 1, b + k))
+    mesh = bpy.data.meshes.new("VergeDirt")
+    mesh.from_pydata(verts, [], faces)
+    mesh.materials.append(mats["verge_dirt"])
+    set_uvs(mesh, uvs)
+    set_attribute(mesh, "fade", fade)
+    link(bpy.data.objects.new("VergeDirt", mesh), coll)
+
+
+def build_guard_stones(road, mats, coll, cam_path):
+    """Rough-hewn granite stones every 2 to 3 m along the right edge, each set slightly askew,
+    where the ground within 4 m of the edge falls by more than STONE_DROP. Stones that would
+    stand within 1.5 m of the camera path are left out, so none fills the frame."""
+    rng = random.Random(SEED + 2)
+    cam_kd = kdtree.KDTree(len(cam_path))
+    for k, c in enumerate(cam_path):
+        cam_kd.insert((c.x, c.y, 0.0), k)
+    cam_kd.balance()
+    n = len(road.points)
+    skipped = 0
+    beyond = [p - nrm * (ROAD_HALF_WIDTH + 4.0) for p, nrm in zip(road.points, road.normals)]
+    drop = smooth([p.z - base_height(q.x, q.y) for p, q in zip(road.points, beyond)], radius=12, passes=1)
+    b = MeshBuilder()
+    count = 0
+    s = rng.uniform(0.0, 2.0)
+    while s < road.cum[-1]:
+        i = min(bisect.bisect_right(road.cum, s), n - 1)
+        if drop[i] > STONE_DROP:
+            p, tan, nrm = road.sample(s)
+            centre = p - nrm * (ROAD_HALF_WIDTH + STONE_OFFSET)
+            if cam_kd.find((centre.x, centre.y, 0.0))[2] < 1.5:
+                skipped += 1
+                s += rng.uniform(2.0, 3.0)
+                continue
+            half = max(STONE_SIZE[:2]) / 2
+            ground = min(road.terrain_height(centre.x + dx, centre.y + dy) for dx in (-half, half) for dy in (-half, half))
+            size = [c * rng.uniform(0.9, 1.1) for c in STONE_SIZE]
+            m = (T(centre.x, centre.y, ground) @ R(math.atan2(tan.y, tan.x) + rng.uniform(-0.15, 0.15), 'Z')
+                 @ R(rng.uniform(-0.06, 0.06), 'X') @ R(rng.uniform(-0.06, 0.06), 'Y'))
+            b.hewn_box(m, (size[0], size[1], size[2] + 0.15), rng, bury=0.15)
+            count += 1
+        s += rng.uniform(2.0, 3.0)
+    print(f"guard stones: {count}, {skipped} left out near the camera path")
+    b.to_object("GuardStones", [mats["granite"]], coll)
 
 
 def build_speed_bumps(road, mats, coll):
@@ -1135,7 +1415,7 @@ def build_speed_bumps(road, mats, coll):
             centre, _, nrm = road.sample(b + ds)
             centre.z += road.bump(b + ds) - ROAD_ROUGHNESS + 0.001
             for j in range(stripes + 1):
-                verts.append(centre + nrm * lerp(-ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, j / stripes))
+                verts.append(centre + nrm * lerp(-min(road.right_edge), ROAD_HALF_WIDTH, j / stripes))
         for k in range(steps):
             for j in range(stripes):
                 a = base + k * (stripes + 1) + j
@@ -1151,21 +1431,6 @@ def build_speed_bumps(road, mats, coll):
     mesh.materials.append(mats["bump_yellow"])
     mesh.materials.append(mats["rubber"])
     link(bpy.data.objects.new("SpeedBumps", mesh), coll)
-
-
-def build_fence(road, mats, coll):
-    """Posts every 3 m on the left verge, with two wires."""
-    b = MeshBuilder()
-    posts = []
-    for i in range(0, len(road.points), int(3.0 / ROAD_STEP)):
-        p = road.points[i] + road.normals[i] * (ROAD_HALF_WIDTH + 1.0)
-        p.z = road.terrain_height(p.x, p.y) - 0.1
-        posts.append(p)
-        b.box(p + Vector((0, 0, 0.5)), (0.07, 0.07, 1.0), mat=0, rot=R(random.uniform(-0.05, 0.05), 'X'))
-    for a, c in zip(posts, posts[1:]):
-        for h in (0.55, 0.85):
-            b.rod(a + Vector((0, 0, h)), c + Vector((0, 0, h)), 0.004, mat=1, segments=5)
-    b.to_object("Fence", [mats["wood"], mats["wire"]], coll)
 
 
 def build_barn(road, mats, coll):
@@ -1376,9 +1641,10 @@ def random_value(nodes, kind, lo, hi, seed):
     return socket(node.outputs, "Value", sock)
 
 
-def build_grass(mats, coll, terrain, rng):
+def build_grass(mats, coll, terrain, paved, rng):
     """Grass clumps instanced by geometry nodes over the terrain, with the density taken from
-    the terrain attribute 'grass_density'."""
+    the terrain attribute 'grass_density'. Clumps rooted under the paved objects (road and
+    gutter) are removed: the terrain grid is too coarse for the density to stop at their edges."""
     clumps = bpy.data.collections.new("GrassClumps")  # not linked to the scene: instanced only
     for k in range(GRASS_CLUMPS):
         clumps.objects.link(bpy.data.objects.new(f"GrassClump.{k}", grass_clump(rng, mats["blades"])))
@@ -1400,6 +1666,19 @@ def build_grass(mats, coll, terrain, rng):
     points.inputs['Seed'].default_value = SEED
     links.new(source.outputs['Geometry'], points.inputs['Mesh'])
     links.new(scaled.outputs[0], points.inputs['Density'])
+    join = nodes.new('GeometryNodeJoinGeometry')
+    for obj in paved:
+        info = nodes.new('GeometryNodeObjectInfo')
+        info.inputs['Object'].default_value = obj
+        links.new(info.outputs['Geometry'], join.inputs[0])
+    proximity = nodes.new('GeometryNodeProximity')
+    proximity.target_element = 'FACES'
+    links.new(join.outputs[0], proximity.inputs[0])
+    unpaved = nodes.new('GeometryNodeDeleteGeometry')
+    unpaved.domain = 'POINT'
+    links.new(points.outputs['Points'], unpaved.inputs['Geometry'])
+    # The terrain lies up to GUTTER_SINK below the paving, less where the grid interpolates up.
+    links.new(math_node(tree, 'LESS_THAN', proximity.outputs['Distance'], GUTTER_SINK + 0.02), unpaved.inputs['Selection'])
     variants = nodes.new('GeometryNodeCollectionInfo')
     variants.inputs['Collection'].default_value = clumps
     variants.inputs['Separate Children'].default_value = True
@@ -1414,7 +1693,7 @@ def build_grass(mats, coll, terrain, rng):
     rotation = lean_downwind(tree, yaw.outputs['Vector'], math_node(tree, 'MULTIPLY', wind, GRASS_LEAN))
     instances = nodes.new('GeometryNodeInstanceOnPoints')
     instances.inputs['Pick Instance'].default_value = True
-    links.new(points.outputs['Points'], instances.inputs['Points'])
+    links.new(unpaved.outputs['Geometry'], instances.inputs['Points'])
     links.new(variants.outputs['Instances'], instances.inputs['Instance'])
     links.new(random_value(nodes, 'INT', 0, GRASS_CLUMPS - 1, 2), instances.inputs['Instance Index'])
     links.new(rotation, instances.inputs['Rotation'])
@@ -2401,6 +2680,8 @@ def twitch(frame, starts):
 
 
 def animate(scene, road, scooter, cam, cat):
+    """Keys the ride, the cat and the camera. Returns the x range of the ride and the camera
+    position in each frame."""
     bpy.context.preferences.edit.keyframe_new_interpolation_type = 'LINEAR'
     rig, wheels = scooter.rig, scooter.wheels
     head_rig, tail = cat.head, cat.tail
@@ -2413,6 +2694,7 @@ def animate(scene, road, scooter, cam, cat):
     cam_heading = None
     prev_q = None
     ride_x = []
+    cam_path = []
     susp = Suspension()
     bump_frames = []
     body_lean = 0.0
@@ -2493,6 +2775,7 @@ def animate(scene, road, scooter, cam, cat):
         cam_pos.z = max(cam_pos.z, road.terrain_height(cam_pos.x, cam_pos.y) + 0.25 + 0.2 * verge)
         cam.parent.location = cam_pos
         cam.parent.keyframe_insert("location", frame=frame)
+        cam_path.append(cam_pos)
         cam.data.lens = lens
         cam.data.keyframe_insert("lens", frame=frame)
 
@@ -2506,7 +2789,7 @@ def animate(scene, road, scooter, cam, cat):
             eye.keyframe_insert("scale", frame=f)
 
     print(f"ride: x {ride_x[0]:.1f} -> {ride_x[-1]:.1f}, distance {travelled:.1f} m, bumps at frames {bump_frames}")
-    return ride_x[0], ride_x[-1]
+    return (ride_x[0], ride_x[-1]), cam_path
 
 
 # --------------------------------------------------------------------------- scene
@@ -2629,17 +2912,21 @@ def main():
     cat = build_cat(mats, actors, scooter.body)
 
     cam = build_camera(scene, scooter.target)
-    ride_x = animate(scene, road, scooter, cam, cat)
+    ride_x, cam_path = animate(scene, road, scooter, cam, cat)
 
     terrain = build_terrain(road, mats, env, ride_x)
     build_far_terrain(mats, env)
-    build_road(road, mats, env)
+    road_obj = build_road(road, mats, env)
+    ground = ground_probe(terrain)
+    gutter = build_gutter(road, mats, env, ground)
+    build_drains(road, mats, env)
+    build_verge_dirt(road, mats, env, ground)
+    build_guard_stones(road, mats, env, cam_path)
     build_speed_bumps(road, mats, env)
-    build_fence(road, mats, env)
     build_barn(road, mats, env)
     scatter_trees(road, env, rng, ride_x)
     scatter_rocks(road, mats, env, rng, ride_x)
-    build_grass(mats, env, terrain, rng)
+    build_grass(mats, env, terrain, (road_obj, gutter), rng)
     build_world(scene)
     build_haze(env)
     configure_render(scene)
