@@ -22,6 +22,9 @@ the shot.
   trunks and fluttering branches need per-vertex deformation; doing that as shader displacement
   made the Radeon 680M time out and reset during animation renders.
 - **Wheel interaction.** The scooter pushes the verge grass aside and raises a faint dust trail.
+- **Worn road markings.** The centre line dashes are a clean, uniform `RoadPaint` material and
+  look freshly painted. Mountain roads are rarely repainted: make the markings heavily worn and
+  faded, with the asphalt showing through, chipped edges, and more wear where the tyres run.
 - **Road detail.** Painted edge lines, a gravel shoulder, worn tyre tracks, repair patches, a
   slight crown, and grit along the edges where the road meets the grass.
 - **Terrain erosion.** Run a hydraulic erosion pass on the near height grid for gullies, ridges
