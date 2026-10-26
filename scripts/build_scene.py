@@ -54,6 +54,11 @@ STONE_OFFSET = 0.45  # from the road edge to the middle of a stone
 STONE_DROP = 0.4  # metres the ground must fall within 4 m of the right edge for guard stones
 GRASS_DENSITY = 160.0  # clumps per square metre at the road verge
 GRASS_CLUMPS = 6  # clump variants
+FOREST_START = 60.0  # metres from the camera path to the edge of the dense forest
+FOREST_SPACING = 3.5  # grid the forest firs are jittered on: the crowns touch
+FOREST_RADIUS = 600.0
+FOREST_LOD4 = 90.0  # beyond this distance from the camera path the forest firs are cone stacks
+FAR_FIRS = 3  # cone-stack variants
 # Hay barn in the Kleinwalsertal style on the slope right of the road, a background detail.
 BARN_SITE = (15.0, -15.0)  # in frame from the start to the front shots; the ground falls 1.5 m across it
 BARN_YAW = 0.0  # the long wall with the hay racks faces the road
@@ -662,8 +667,9 @@ def apply_texture(nt, bsdf, sockets):
 
 
 def terrain_material():
-    """Grass ground, with dry ground on crests, rock on steep slopes, and darker hollows.
-    Crests and hollows come from the mesh attribute 'curvature' (positive on crests)."""
+    """Grass ground, with dry ground on crests, rock on steep slopes, darker hollows, and needle
+    litter in the forest. Crests and hollows come from the mesh attribute 'curvature' (positive
+    on crests)."""
     mat = make_material("Terrain", (0.1, 0.12, 0.05), 0.9)
     nt = mat.node_tree
     bsdf = principled_node(mat)
@@ -711,6 +717,11 @@ def terrain_material():
     nt.links.new(macro.outputs['Fac'], macro_shade.inputs['Fac'])
     layers[0] = mix_colour(nt, 1.0, mix_colour(nt, 1.0, layers[0], shade, 'MULTIPLY'),
                            macro_shade.outputs['Color'], 'MULTIPLY')
+    # Needle litter under the forest stands (mesh attribute 'forest'), so the ground between
+    # the crowns reads as forest floor.
+    forest = nt.nodes.new('ShaderNodeAttribute')
+    forest.attribute_name = "forest"
+    layers[0] = mix_colour(nt, forest.outputs['Fac'], layers[0], (0.025, 0.027, 0.018))
     apply_texture(nt, bsdf, layers)
     return mat
 
@@ -1134,7 +1145,7 @@ def lean_downwind(nt, rotation, angle):
     return rotate.outputs['Rotation']
 
 
-def build_terrain(road, mats, coll, ride_x):
+def build_terrain(road, mats, coll, ride_x, cam_path):
     n = TERRAIN_SUBDIV + 1
     half = TERRAIN_SIZE / 2.0
     step = TERRAIN_SIZE / TERRAIN_SUBDIV
@@ -1165,6 +1176,8 @@ def build_terrain(road, mats, coll, ride_x):
     print("curvature percentiles 5/50/95:", [round(ranked[int(len(ranked) * p)], 4) for p in (0.05, 0.5, 0.95)])
     set_attribute(mesh, "curvature", curvature)
     set_attribute(mesh, "grass_density", [grass_density(road, x, y, ride_x) for x, y, _ in verts])
+    cam_kd = camera_kd(cam_path)
+    set_attribute(mesh, "forest", [forest_cover(x, y, cam_kd.find((x, y, 0.0))[2]) for x, y, _ in verts])
     return link(bpy.data.objects.new("Terrain", mesh), coll)
 
 
@@ -1175,12 +1188,10 @@ def build_far_terrain(mats, coll):
     verts = []
     for i in range(rings + 1):
         r = inner * (FAR_RADIUS / inner) ** (i / rings)
-        blend = smoothstep(inner, 400.0, r)
         for k in range(segments):
             a = 2.0 * math.pi * k / segments
             x, y = r * math.cos(a), r * math.sin(a)
-            near = base_height(x, y) - 0.5
-            verts.append((x, y, lerp(near, far_height(x, y), blend) if blend > 0 else near))
+            verts.append((x, y, far_ground(x, y)))
     faces = [(i * segments + k, i * segments + (k + 1) % segments,
               (i + 1) * segments + (k + 1) % segments, (i + 1) * segments + k)
              for i in range(rings) for k in range(segments)]
@@ -1373,10 +1384,7 @@ def build_guard_stones(road, mats, coll, cam_path):
     where the ground within 4 m of the edge falls by more than STONE_DROP. Stones that would
     stand within 1.5 m of the camera path are left out, so none fills the frame."""
     rng = random.Random(SEED + 2)
-    cam_kd = kdtree.KDTree(len(cam_path))
-    for k, c in enumerate(cam_path):
-        cam_kd.insert((c.x, c.y, 0.0), k)
-    cam_kd.balance()
+    cam_kd = camera_kd(cam_path)
     n = len(road.points)
     skipped = 0
     beyond = [p - nrm * (ROAD_HALF_WIDTH + 4.0) for p, nrm in zip(road.points, road.normals)]
@@ -1532,17 +1540,219 @@ def load_tree_meshes():
     # the same as opaque card shadows at the distances the trees are seen from.
     for mat in {m for mesh in loaded.values() for m in mesh.materials if m and "twig" in m.name}:
         mat.use_transparent_shadow = False
-    return {lod: [loaded[n] for n in group] for lod, group in names.items()}
+    meshes = {lod: [loaded[n] for n in group] for lod, group in names.items()}
+    meshes["LOD3"] = [forest_lod(mesh) for mesh in meshes["LOD2"]]
+    return meshes
 
 
-def scatter_trees(road, coll, rng, ride_x):
-    """Fir trees in clusters away from the road: full LOD1 detail near the ride, LOD2 further out.
+def forest_lod(lod2):
+    """A cheaper level of detail for the forest: the twig cards of LOD2 (~3k faces) on a plain
+    tapered trunk, in place of the modelled trunk, bark and dead branches (~19k faces)."""
+    mesh = lod2.copy()
+    mesh.name = lod2.name.replace("LOD2", "LOD3")
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    slots = [m.name if m else "" for m in mesh.materials]
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if "twig" not in slots[f.material_index]], context='FACES')
+    height = max(v.co.z for v in bm.verts)
+    bark = next(k for k, name in enumerate(slots) if name.endswith("_bark"))
+    res = bmesh.ops.create_cone(bm, cap_ends=False, segments=8, radius1=0.28, radius2=0.03, depth=height,
+                                matrix=T(0, 0, height / 2))
+    for face in {f for v in res['verts'] for f in v.link_faces}:
+        face.material_index = bark
+        face.smooth = True
+    bm.to_mesh(mesh)
+    bm.free()
+    print(f"{mesh.name}: {len(mesh.polygons)} faces, {height:.1f} m")
+    return mesh
+
+
+def far_fir(rng, mat):
+    """A distant fir of ~150 faces, about as tall as the Poly Haven ones: a short trunk under
+    tiers of drooping cones with jagged rims, narrowing to a spire."""
+    height = rng.uniform(14.0, 19.0)
+    bm = bmesh.new()
+    bmesh.ops.create_cone(bm, cap_ends=False, segments=6, radius1=0.25, radius2=0.1, depth=2.5, matrix=T(0, 0, 1.25))
+    tiers = 7
+    for k in range(tiers):
+        low = lerp(1.8, height * 0.82, k / tiers)
+        top = low + (height - low) * 0.45 if k < tiers - 1 else height
+        radius = 3.0 * (1.0 - low / height) ** 0.9 + 0.3
+        apex = bm.verts.new((0.0, 0.0, top))
+        segments = 12
+        twist = rng.uniform(0, 2 * math.pi)
+        rim = []
+        for j in range(segments):
+            a = twist + 2 * math.pi * j / segments
+            r = radius * (1.0 if j % 2 == 0 else rng.uniform(0.55, 0.75))
+            droop = 0.35 * radius if j % 2 == 0 else 0.0  # branch tips hang lower than the gaps
+            rim.append(bm.verts.new((r * math.cos(a), r * math.sin(a), low - droop + rng.uniform(-0.2, 0.2))))
+        for j in range(segments):
+            bm.faces.new((rim[j], rim[(j + 1) % segments], apex))
+    mesh = bpy.data.meshes.new("FarFir")
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.materials.append(mat)
+    return mesh
+
+
+def far_fir_material():
+    """Dark needles, varied per tree, with a fine bump for the clumps of twigs."""
+    mat = make_material("FarFir", (0.02, 0.035, 0.022), 0.8)
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    info = nt.nodes.new('ShaderNodeObjectInfo')
+    tint = nt.nodes.new('ShaderNodeValToRGB')
+    ramp_colors(tint, (0.014, 0.026, 0.018), (0.035, 0.045, 0.025))
+    nt.links.new(info.outputs['Random'], tint.inputs['Fac'])
+    nt.links.new(tint.outputs['Color'], bsdf.inputs['Base Color'])
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    clumps = nt.nodes.new('ShaderNodeTexNoise')
+    clumps.inputs['Scale'].default_value = 2.0
+    clumps.inputs['Detail'].default_value = 4.0
+    nt.links.new(coord.outputs['Object'], clumps.inputs['Vector'])
+    bump = nt.nodes.new('ShaderNodeBump')
+    bump.inputs['Strength'].default_value = 0.6
+    nt.links.new(clumps.outputs['Fac'], bump.inputs['Height'])
+    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+    return mat
+
+
+def camera_kd(cam_path):
+    """KD-tree of the camera positions over the clip, in the ground plane."""
+    kd = kdtree.KDTree(len(cam_path))
+    for k, (c, _, _) in enumerate(cam_path):
+        kd.insert((c.x, c.y, 0.0), k)
+    kd.balance()
+    return kd
+
+
+def in_camera_view(points, cam_path, margin=1.25, every=4):
+    """Which of the points (an N×3 array) come into the camera's view at any time during the
+    clip, sampled every few frames, with the field of view widened by margin for the shake."""
+    seen = np.zeros(len(points), dtype=bool)
+    for c, target, lens in cam_path[::every]:
+        forward = (target - c).normalized()
+        right = forward.cross(Vector((0, 0, 1))).normalized()
+        up = right.cross(forward)
+        half_w = margin * 18.0 / lens  # 36 mm sensor across the frame
+        half_h = half_w * 9.0 / 16.0
+        d = points - np.array(c)
+        depth = d @ np.array(forward)
+        seen |= ((depth > 1.0) & (np.abs(d @ np.array(right)) < depth * half_w)
+                 & (np.abs(d @ np.array(up)) < depth * half_h))
+    return seen
+
+
+class HeightGrid:
+    """Ground heights sampled every `step` metres over a square, for fast bilinear lookups of
+    many points at once."""
+
+    def __init__(self, road, radius, step):
+        self.radius, self.step = radius, step
+        n = int(2 * radius / step) + 1
+        self.n = n
+        self.h = np.array([[ground_height(road, -radius + i * step, -radius + j * step) for i in range(n)]
+                           for j in range(n)])
+
+    def at(self, x, y):
+        u = np.clip((x + self.radius) / self.step, 0, self.n - 1.001)
+        v = np.clip((y + self.radius) / self.step, 0, self.n - 1.001)
+        i, j = u.astype(int), v.astype(int)
+        fu, fv = u - i, v - j
+        h = self.h
+        return ((h[j, i] * (1 - fu) + h[j, i + 1] * fu) * (1 - fv)
+                + (h[j + 1, i] * (1 - fu) + h[j + 1, i + 1] * fu) * fv)
+
+
+def unoccluded(points, cam_path, grid, every=8, samples=32):
+    """Which of the points (an N×3 array) the camera sees over the ground at some time during
+    the clip, sampled every few frames: a sight line is blocked where the ground rises above it
+    by more than half a metre. Field of view is not tested."""
+    seen = np.zeros(len(points), dtype=bool)
+    t = np.linspace(0.02, 0.95, samples)[None, :]
+    for c, _, _ in cam_path[::every]:
+        todo = ~seen
+        p = points[todo]
+        c = np.array(c)
+        line = c[None, None, :] + (p - c)[:, None, :] * t[:, :, None]
+        ground = grid.at(line[..., 0], line[..., 1])
+        seen[np.flatnonzero(todo)[np.all(ground < line[..., 2] + 0.5, axis=1)]] = True
+    return seen
+
+
+def far_ground(x, y):
+    """Height of the far terrain, which starts on base_height inside the near terrain's edge."""
+    near = base_height(x, y) - 0.5
+    blend = smoothstep(120.0, 400.0, math.hypot(x, y))
+    return lerp(near, far_height(x, y), blend) if blend > 0 else near
+
+
+def ground_height(road, x, y):
+    """Height of whichever terrain mesh lies at x, y."""
+    if max(abs(x), abs(y)) < TERRAIN_SIZE / 2:
+        return road.terrain_height(x, y)
+    return far_ground(x, y)
+
+
+def forest_cover(x, y, cam_distance):
+    """0 in meadows, 1 in the forest: stands with ragged edges from noise, and an open meadow
+    within about FOREST_START of the camera path."""
+    n = noise.noise(Vector((x / 70.0, y / 70.0, 8.1))) + 0.35 * noise.noise(Vector((x / 18.0, y / 18.0, 2.6)))
+    edge = cam_distance + 12.0 * noise.noise(Vector((x / 25.0, y / 25.0, 9.4)))
+    return smoothstep(-0.45, -0.25, n) * smoothstep(FOREST_START - 10.0, FOREST_START + 10.0, edge)
+
+
+def forest_points(road, cam_path):
+    """The dense forest: LOD3 firs on a jittered FOREST_SPACING grid out to FOREST_RADIUS,
+    where forest_cover allows, the camera sees them at some time in the clip, and the ground is
+    not steeper than 60°. Returns points, variants, yaws and scales."""
+    rng = random.Random(SEED + 3)  # its own generator, so the scatter of rocks stays put
+    cam_kd = camera_kd(cam_path)
+    cells = int(FOREST_RADIUS / FOREST_SPACING)
+    candidates = []
+    for i in range(-cells, cells):
+        for j in range(-cells, cells):
+            x = (i + rng.random()) * FOREST_SPACING
+            y = (j + rng.random()) * FOREST_SPACING
+            if math.hypot(x, y) > FOREST_RADIUS or road.distance(x, y)[1] < 10.0:
+                continue
+            if rng.random() < forest_cover(x, y, cam_kd.find((x, y, 0.0))[2]) ** 2:
+                candidates.append((x, y, ground_height(road, x, y)))
+    base = np.array(candidates)
+    top = base + np.array((0.0, 0.0, 6.0))
+    in_view = in_camera_view(base, cam_path) | in_camera_view(top, cam_path)
+    grid = HeightGrid(road, FOREST_RADIUS, 3.0)
+    seen = in_view.copy()
+    seen[in_view] = unoccluded(top[in_view], cam_path, grid)
+    points, variant = [], []
+    for (x, y, z), visible in zip(candidates, seen):
+        if not visible:
+            continue
+        slope = math.hypot(ground_height(road, x + 1.0, y) - ground_height(road, x - 1.0, y),
+                           ground_height(road, x, y + 1.0) - ground_height(road, x, y - 1.0)) / 2.0
+        if slope < 1.7:
+            points.append((x, y, z - 0.3))
+            far = cam_kd.find((x, y, 0.0))[2] > FOREST_LOD4
+            variant.append(9 + rng.randrange(FAR_FIRS) if far else 6 + rng.randrange(3))
+    near = sum(v < 9 for v in variant)
+    print(f"forest: {len(candidates)} firs in the stands, {int(in_view.sum())} in view, {int(seen.sum())} not "
+          f"hidden by the ground, {len(points)} on slopes under 60°: {near} LOD3, {len(points) - near} far")
+    n = len(points)
+    return points, variant, [rng.uniform(0, 2 * math.pi) for _ in range(n)], [rng.uniform(0.45, 0.9) for _ in range(n)]
+
+
+def scatter_trees(road, coll, rng, ride_x, cam_path):
+    """Fir trees in clusters away from the road within FOREST_START of the camera path, with
+    full LOD1 detail near the ride and LOD2 further out, then the dense forest (forest_points).
     The trees are instanced by geometry nodes on the vertices of a point mesh, so each one can
     lean with the wind about its base. Displacing the tree vertices in the shader instead made
     the Radeon 680M time out and reset during animation renders."""
     meshes = load_tree_meshes()
     variants = bpy.data.collections.new("TreeVariants")  # not linked to the scene: instanced only
-    for k, mesh in enumerate(meshes["LOD1"] + meshes["LOD2"]):
+    far_rng, far_mat = random.Random(SEED + 4), far_fir_material()
+    far = [far_fir(far_rng, far_mat) for _ in range(FAR_FIRS)]
+    for k, mesh in enumerate(meshes["LOD1"] + meshes["LOD2"] + meshes["LOD3"] + far):
         variants.objects.link(bpy.data.objects.new(f"TreeVariant.{k}", mesh))
     points, variant, yaw, scale = [], [], [], []
     while len(points) < 300:
@@ -1557,10 +1767,15 @@ def scatter_trees(road, coll, rng, ride_x):
         points.append((x, y, road.terrain_height(x, y) - 0.1))
         yaw.append(rng.uniform(0, 2 * math.pi))
         scale.append(rng.uniform(0.35, 0.8))
-    # Clear the barn's site after the scatter, so the other trees keep their places.
-    keep = [k for k, p in enumerate(points) if math.hypot(p[0] - BARN_SITE[0], p[1] - BARN_SITE[1]) > 8.0]
-    print(f"trees removed for the barn: {len(points) - len(keep)}")
+    # Clear the barn's site, and leave the far ones to the forest, after the scatter, so the other
+    # trees keep their places.
+    cam_kd = camera_kd(cam_path)
+    keep = [k for k, p in enumerate(points) if math.hypot(p[0] - BARN_SITE[0], p[1] - BARN_SITE[1]) > 8.0
+            and cam_kd.find((p[0], p[1], 0.0))[2] < FOREST_START]
+    print(f"scattered trees kept: {len(keep)} of {len(points)}")
     points, variant, yaw, scale = ([values[k] for k in keep] for values in (points, variant, yaw, scale))
+    for values, more in zip((points, variant, yaw, scale), forest_points(road, cam_path)):
+        values += more
     mesh = bpy.data.meshes.new("TreePoints")
     mesh.from_pydata(points, [], [])
     for name, values in (("variant", variant), ("yaw", yaw), ("scale", scale)):
@@ -2705,8 +2920,8 @@ def twitch(frame, starts):
 
 
 def animate(scene, road, scooter, cam, cat):
-    """Keys the ride, the cat and the camera. Returns the x range of the ride and the camera
-    position in each frame."""
+    """Keys the ride, the cat and the camera. Returns the x range of the ride and, for each
+    frame, the camera position, the point it looks at and its focal length."""
     bpy.context.preferences.edit.keyframe_new_interpolation_type = 'LINEAR'
     rig, wheels = scooter.rig, scooter.wheels
     head_rig, tail = cat.head, cat.tail
@@ -2800,7 +3015,7 @@ def animate(scene, road, scooter, cam, cat):
         cam_pos.z = max(cam_pos.z, road.terrain_height(cam_pos.x, cam_pos.y) + 0.25 + 0.2 * verge)
         cam.parent.location = cam_pos
         cam.parent.keyframe_insert("location", frame=frame)
-        cam_path.append(cam_pos)
+        cam_path.append((cam_pos, pos + Vector((0, 0, 0.33)), lens))  # the camera tracks the scooter
         cam.data.lens = lens
         cam.data.keyframe_insert("lens", frame=frame)
 
@@ -2939,7 +3154,7 @@ def main():
     cam = build_camera(scene, scooter.target)
     ride_x, cam_path = animate(scene, road, scooter, cam, cat)
 
-    terrain = build_terrain(road, mats, env, ride_x)
+    terrain = build_terrain(road, mats, env, ride_x, cam_path)
     build_far_terrain(mats, env)
     road_obj = build_road(road, mats, env)
     ground = ground_probe(terrain)
@@ -2949,7 +3164,7 @@ def main():
     build_guard_stones(road, mats, env, cam_path)
     build_speed_bumps(road, mats, env)
     build_barn(road, mats, env)
-    scatter_trees(road, env, rng, ride_x)
+    scatter_trees(road, env, rng, ride_x, cam_path)
     scatter_rocks(road, mats, env, rng, ride_x)
     build_grass(mats, env, terrain, (road_obj, gutter), rng)
     build_world(scene)
