@@ -8,9 +8,13 @@ the shot.
 - **Attached ears.** The ears look detached from the head. They are separate objects that
   rotate for the twitches and the wind flutter; blend them into the head so no gap or seam shows
   at the base in any pose.
+- **Fur in Cycles.** In Cycles renders the cat is a flat black silhouette: the strands use a
+  Principled BSDF, which shows neither the fur texture nor light from behind. Switch the strand
+  material to the Principled Hair BSDF (melanin parametrisation, near-black) for Cycles, so the
+  fur shows sheen and a rim against dark backgrounds. EEVEE 5.2 renders that BSDF black, so the
+  render scripts need to select the strand shader per engine.
 - **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
-  and tail), add clumping and some flyaway strands, and use the Principled Hair BSDF for Cycles
-  renders.
+  and tail), add clumping and some flyaway strands.
 - **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
   them so each toe wraps the grip.
 
