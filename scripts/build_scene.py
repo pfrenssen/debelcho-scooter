@@ -517,7 +517,7 @@ def build_materials():
         "terrain": terrain_material(),
         "asphalt": asphalt_material(),
         "alpine": alpine_material(),
-        "paint": make_material("RoadPaint", (0.85, 0.82, 0.70), 0.6),
+        "paint": road_paint_material(),
         "wood": make_material("FenceWood", (0.20, 0.12, 0.06), 0.8),
         "wire": make_material("FenceWire", (0.4, 0.4, 0.42), 0.4, metallic=1.0),
         # Weathered logs vary from dark brown to silvery grey-brown; the slats and boards are paler.
@@ -701,6 +701,47 @@ def asphalt_material():
     uv = nt.nodes.new('ShaderNodeUVMap')
     uv.uv_map = "UVMap"
     apply_texture(nt, principled_node(mat), texture_set(nt, "asphalt_02", 3.0, uv.outputs['UV']))
+    return mat
+
+
+PAINT_HALF_WIDTH = 0.035
+
+
+def road_paint_material():
+    """Centre line paint, worn and faded: the paint has flaked off in patches so the asphalt
+    shows through, the edges are chipped, and what is left is dull and greyed. How worn it is
+    comes from the vertex attribute 'wear' (0 fresh, 1 gone). UV u runs along the road and v
+    across the line, in metres."""
+    mat = make_material("RoadPaint", (0.62, 0.60, 0.52), 0.75)
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.uv_map = "UVMap"
+    split = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(uv.outputs['UV'], split.inputs[0])
+    flakes = []
+    for scale in (45.0, 6.0):  # small flakes, and larger patches where whole chunks came off
+        tex = nt.nodes.new('ShaderNodeTexNoise')
+        tex.inputs['Scale'].default_value = scale
+        tex.inputs['Detail'].default_value = 5.0
+        tex.inputs['Roughness'].default_value = 0.65
+        nt.links.new(uv.outputs['UV'], tex.inputs['Vector'])
+        flakes.append(tex.outputs['Fac'])
+    flaking = math_node(nt, 'ADD', math_node(nt, 'MULTIPLY', flakes[0], 0.6), math_node(nt, 'MULTIPLY', flakes[1], 0.4))
+    # The noise spreads only about ±0.06 round 0.5; stretch it so the wear sets the fraction of
+    # paint left rather than switching the whole line on or off.
+    flaking = math_node(nt, 'MULTIPLY_ADD', flaking, 4.0)
+    flaking.node.inputs[2].default_value = -1.5
+    wear = nt.nodes.new('ShaderNodeAttribute')
+    wear.attribute_name = "wear"
+    edge = math_node(nt, 'DIVIDE', math_node(nt, 'ABSOLUTE', split.outputs['Y'], 0.0), PAINT_HALF_WIDTH)
+    # Paint left on the road: flakes come off first where the wear is high and at the edges.
+    thickness = math_node(nt, 'SUBTRACT', flaking, math_node(
+        nt, 'ADD', math_node(nt, 'MULTIPLY', wear.outputs['Fac'], 0.9),
+        math_node(nt, 'MULTIPLY', math_node(nt, 'POWER', edge, 2.0), 0.3)))
+    nt.links.new(smooth_range(nt, thickness, 0.0, 0.03), bsdf.inputs['Alpha'])
+    colour = mix_colour(nt, smooth_range(nt, thickness, 0.0, 0.12), (0.3, 0.29, 0.26), (0.55, 0.53, 0.46))
+    nt.links.new(colour, bsdf.inputs['Base Color'])
     return mat
 
 
@@ -1052,20 +1093,34 @@ def build_road(road, mats, coll):
     set_uvs(mesh, [(s, v) for s in road.cum for v in across])
     link(bpy.data.objects.new("Road", mesh), coll)
 
-    # Dashed centre line: 0.9 m dashes every 2 m.
-    verts, faces = [], []
+    # Dashed centre line: 0.9 m dashes every 2 m. The paint wears most on bends, where cars cut
+    # across the line, and varies slowly along the road.
+    n = len(road.points)
+    headings = [math.atan2(t.y, t.x) for t in road.tangents]
+    wear = []
+    for i in range(n):
+        a, b = max(i - 4, 0), min(i + 4, n - 1)
+        bend = abs(wrap_angle(headings[b] - headings[a])) / (road.cum[b] - road.cum[a])
+        drift = noise.noise(Vector((road.cum[i] / 6.0, 0.0, 2.9)))
+        wear.append(min(max(0.4 + 0.3 * smoothstep(0.02, 0.1, bend) + 0.3 * drift, 0.0), 1.0))
+    verts, faces, uvs, vert_wear = [], [], [], []
     dash, period = int(0.9 / ROAD_STEP), int(2.0 / ROAD_STEP)
     up = Vector((0, 0, 0.004))
-    for start in range(0, len(road.points) - dash, period):
+    for start in range(0, n - dash, period):
         base = len(verts)
         for i in range(start, start + dash + 1):
             p, nrm = road.points[i] + up, road.normals[i]
-            verts += [p + nrm * 0.035, p - nrm * 0.035]
+            verts += [p + nrm * PAINT_HALF_WIDTH, p - nrm * PAINT_HALF_WIDTH]
+            uvs += [(road.cum[i], PAINT_HALF_WIDTH), (road.cum[i], -PAINT_HALF_WIDTH)]
+            vert_wear += [wear[i]] * 2
         for k in range(dash):
             faces.append((base + 2 * k, base + 2 * k + 2, base + 2 * k + 3, base + 2 * k + 1))
     mesh = bpy.data.meshes.new("RoadLine")
     mesh.from_pydata(verts, [], faces)
     mesh.materials.append(mats["paint"])
+    set_uvs(mesh, uvs)
+    set_attribute(mesh, "wear", vert_wear)
+    print("road paint wear 5/50/95 %:", [round(sorted(wear)[int(n * p)], 2) for p in (0.05, 0.5, 0.95)])
     link(bpy.data.objects.new("RoadLine", mesh), coll)
 
 
