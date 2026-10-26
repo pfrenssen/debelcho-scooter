@@ -1397,7 +1397,9 @@ def build_haze(coll):
         nt.nodes.remove(node)
     out = next(n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL')
     volume = nt.nodes.new('ShaderNodeVolumePrincipled')
-    volume.inputs['Color'].default_value = (1.0, 0.88, 0.8, 1.0)
+    # Aerosols scatter about neutrally, with a little blue from the air; the warmth at sunset
+    # comes from the sunlight, not from the haze.
+    volume.inputs['Color'].default_value = (0.9, 0.95, 1.0, 1.0)
     volume.inputs['Anisotropy'].default_value = 0.6
     coord = nt.nodes.new('ShaderNodeTexCoord')
     xyz = nt.nodes.new('ShaderNodeSeparateXYZ')
