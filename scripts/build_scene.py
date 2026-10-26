@@ -116,6 +116,7 @@ EYE_RADII = (0.013, 0.0155, 0.0105)  # depth, width, height in the eye's own fra
 CORNEA_BULGE = 1.05  # the cornea's depth as a multiple of the eye's
 IRIS_DEPTH = 0.7  # the flat iris sits this fraction of the eye's depth in front of its centre
 NOSE_CENTRE = Vector((0.192, 0.0, 0.586))
+EAR_ROOT = 0.012  # how far each ear runs on into the skull below its base
 TAIL_BASE = Vector((-0.13, 0.0, 0.21))
 
 SUN_ELEVATION = 4.0
@@ -2113,7 +2114,8 @@ def toes(b, front, side, y, z, radius, mat):
 
 
 class Cat:
-    """Animated parts of the cat. Ears, eyes and whiskers are ordered (right, left)."""
+    """Animated parts of the cat. Ears (the pivots that bend them), eyes and whiskers are ordered
+    (right, left)."""
 
     def __init__(self, rig, head, tail, ears, eyes, whiskers):
         self.rig, self.head, self.tail = rig, head, tail
@@ -2530,24 +2532,47 @@ def build_head(mats, coll, cat_rig):
             whisker(w, start, Vector((0.35, s * spread, rise)), length, Vector((-0.5, s * 0.2, -0.25)), 0.0003)
         w.to_object("BrowWhiskersL" if s > 0 else "BrowWhiskersR", [mats["whisker"]], coll, head_rig)
 
-    # Large upright ears, set high and wide at the base.
+    # Large upright ears, set high and wide at the base. The cone runs on EAR_ROOT into the
+    # skull, so its rim stays inside the head where the skull curves away under the base. The
+    # ear does not turn as a whole: a hook to a pivot at the base, which carries the twitches
+    # and the flutter, bends the ear above the root, and the root stays fixed in the head.
     ears = []
     for s in (-1, 1):
         base = Vector((0.098, s * 0.05, 0.645))
         e = MeshBuilder(base)
-        e.cone(Matrix.Translation(base) @ S(0.5, 1, 1), 0.038, 0.072, 0)
+        e.cone(Matrix.Translation(base - Vector((0, 0, EAR_ROOT))) @ S(0.5, 1, 1), 0.038 * (1 + EAR_ROOT / 0.072),
+               0.072 + EAR_ROOT, 0, segments=24)
         # The inner ear lies along the sloping front face of the ear, a little proud of it.
         e.cone(Matrix.Translation(base + Vector((0.0155, 0, 0.006))) @ R(-0.26, 'Y') @ S(0.15, 1, 1), 0.027, 0.056, 1)
-        ear = e.to_object("EarL" if s > 0 else "EarR", [mats["fur"], mats["inner_ear"]], coll, head_rig, base - NECK)
+        for z in (-0.006, 0.0, 0.005, 0.01, 0.017, 0.025, 0.034, 0.044, 0.056):  # rings for the bend
+            bmesh.ops.bisect_plane(e.bm, geom=e.bm.verts[:] + e.bm.edges[:] + e.bm.faces[:], plane_co=(0, 0, z),
+                                   plane_no=(0, 0, 1))
+        name = "EarL" if s > 0 else "EarR"
+        ear = e.to_object(name, [mats["fur"], mats["inner_ear"]], coll, head_rig, base - NECK)
         ear.rotation_euler = (-s * 0.3, -0.12, s * 0.2)
-        # Tufts of pale hair from the front of the inner ear, low down, combed a little upwards.
-        tufts = ear.vertex_groups.new(name="Tufts")
+        pivot = make_empty(name.replace("Ear", "EarPivot"), coll, head_rig, base - NECK, size=0.02)
+        pivot.rotation_euler = ear.rotation_euler  # same frame as the ear, so the hook binds at identity
+
         inner = {v for poly in ear.data.polygons if poly.material_index == 1 for v in poly.vertices}
+        bend = ear.vertex_groups.new(name="Bend")
+        outer = ear.vertex_groups.new(name="OuterFur")
+        tufts = ear.vertex_groups.new(name="Tufts")
         for v in ear.data.vertices:
-            if v.index in inner and v.normal.x > 0.2:
-                tufts.add([v.index], 1.0 - smoothstep(0.01, 0.03, v.co.z), 'REPLACE')
+            bend.add([v.index], smoothstep(0.003, 0.03, v.co.z), 'REPLACE')
+            if v.index in inner:
+                # Tufts of pale hair from the front of the inner ear, low down, combed a little upwards.
+                if v.normal.x > 0.2:
+                    tufts.add([v.index], 1.0 - smoothstep(0.01, 0.03, v.co.z), 'REPLACE')
+            else:
+                # Fur on the outside, as long as the head's at the root and shorter up to the tip.
+                outer.add([v.index], lerp(1.0, 0.4, smoothstep(0.0, 0.06, v.co.z)), 'REPLACE')
+        hook = ear.modifiers.new("Bend", 'HOOK')
+        hook.object = pivot
+        hook.vertex_group = bend.name
+        add_fur(ear, mats, 700, 0.006, (0.0, 0.0, 0.8), density_group=outer.name)
+        ear.particle_systems[-1].vertex_group_length = outer.name
         add_fur(ear, mats, 120, 0.008, (0.0, 0.0, 0.5), density_group=tufts.name, strands="ear_tufts")
-        ears.append(ear)
+        ears.append(pivot)
 
     # Almond eyes: ellipsoids set into the head under the brows, turned a little outwards and
     # with the outer corner up. The object frame is the eye's own, which the iris and the slit

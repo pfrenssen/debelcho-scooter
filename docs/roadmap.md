@@ -5,9 +5,6 @@ the shot.
 
 ## Cat
 
-- **Attached ears.** The ears look detached from the head. They are separate objects that
-  rotate for the twitches and the wind flutter; blend them into the head so no gap or seam shows
-  at the base in any pose.
 - **Fur in Cycles.** In Cycles renders the cat is a flat black silhouette: the strands use a
   Principled BSDF, which shows neither the fur texture nor light from behind. Switch the strand
   material to the Principled Hair BSDF (melanin parametrisation, near-black) for Cycles, so the
