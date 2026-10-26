@@ -22,7 +22,7 @@ from mathutils.bvhtree import BVHTree
 
 ROOT = Path(__file__).resolve().parent.parent
 BLEND_PATH = ROOT / "build" / "cat_scooter.blend"
-TEXTURES = ROOT / "assets" / "textures"  # fetched by scripts/fetch_textures.py
+TEXTURES = ROOT / "assets" / "textures"  # fetched by scripts/fetch_assets.py
 
 FPS = 24
 FRAME_END = 480

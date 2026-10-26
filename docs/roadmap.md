@@ -41,8 +41,12 @@ the shot.
 
 ## Rendering
 
-- **Cycles on the GPU.** With `hip-runtime-amd` installed, Cycles lists the Radeon 680M as a HIP
-  device, but a frame renders no faster than on the 16-thread CPU (about 2 min 15 s) and still
-  uses about 34 min of CPU time. Find out whether the render actually runs on the GPU.
-- **Final render in Cycles.** At about 2 min 15 s per frame, the 288-frame animation takes
-  about 10.5 hours on the CPU.
+- **Cycles on the GPU.** `render_cycles.py` enables the GPUs but leaves the CPU device on, so
+  every render so far ran on CPU and GPU together. On the laptop (Ryzen 7 PRO 6850U, Radeon
+  680M over HIP) a 1280×720 frame takes about 2 min 15 s and about 34 min of CPU time, no faster
+  than the CPU alone; a 1920×1200 frame takes 5 to 7 min. On the workstation (Ryzen 9 3950X,
+  GTX 1060 6GB) a 1280×720 frame takes 65 s with 27 min of CPU time. Time a GPU-only and a
+  CPU-only frame on each machine to find the fastest device set.
+- **Final render in Cycles.** The 480-frame clip takes about 8.7 hours on the workstation and
+  about 18 hours on the laptop. It needs **Fur in Cycles** first: with the current strand
+  shader the cat renders as a flat black silhouette.
