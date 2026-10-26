@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-
 """Download the CC0 Poly Haven textures and models the scene uses into assets/.
 
 Usage:

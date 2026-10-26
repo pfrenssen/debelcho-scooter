@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-
 """Close-up inspection render: swaps in a camera that rides with the scooter.
 
 Usage:

@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-
 """Switch the scene to Cycles for a final-quality render.
 
 Usage:

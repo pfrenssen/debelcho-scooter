@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-
 """Report the smallest gap between the cat's head and the handlebar over the animation.
 
 Usage:

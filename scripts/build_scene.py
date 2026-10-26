@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-
 """Build the scene: a black cat riding an electric scooter along a road through hills.
 
 Usage:
