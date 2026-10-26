@@ -17,6 +17,24 @@ the shot.
 
 ## Environment
 
+The forest and fog items below are steps towards the look of
+`~/Downloads/Austria-kleinwalsertal-hiking3.jpg` (not in the repository): hills under a dense fir
+forest, paler and greyer with distance, with low cloud caught on the slopes.
+
+- **Dense forest.** About 300 firs are scattered over the hills, and the ground shows between
+  them. Cover the hills around the ride with a dense fir forest: low-poly stand-in firs beyond
+  about 60 m from the camera, at a density that keeps the crowns touching, left out where the
+  camera never looks during the clip; stands and clearings from a low-frequency noise; height
+  and colour varied per tree; and a dark forest floor in the terrain shader under the stands,
+  so gaps between the crowns read as forest.
+- **Taller hills.** The foothills behind the barn rise only 10 to 30 m. Raise and steepen them,
+  so the forested slope fills the background.
+- **Distance fog.** A shared node group that fades every material (terrain, trees, barn, road)
+  towards a fog colour with camera distance, more at low height, as `alpine_material` already
+  does for the far terrain. It gives the layered silhouettes that grow paler with distance.
+- **Fog banks.** Low cloud drifting over the slopes: stretched volume ellipsoids within the
+  300 m EEVEE volume range, their density from 4D noise × a height falloff × a soft edge, with
+  the noise W animated for the drift.
 - **Branch motion.** Grass clumps and firs lean as rigid wholes with the gusts. Bending
   trunks and fluttering branches need per-vertex deformation; doing that as shader displacement
   made the Radeon 680M time out and reset during animation renders.
