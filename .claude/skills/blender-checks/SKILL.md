@@ -35,6 +35,11 @@ Gotchas found the hard way in this project, on Blender 5.2.3. Each one cost a wa
 
 ## Judging stills
 
+- View every still before naming it in a report, and check that it frames what it is meant to
+  show.
+- Before tuning a new object for visibility or aiming a close-up, find where it lands in the
+  frame with `bpy_extras.object_utils.world_to_camera_view` at the frames that matter, instead
+  of estimating.
 - Motion blur and depth of field hide surface detail in shot frames. Judge materials and
   geometry on a static close camera without DOF or motion blur, then confirm in a shot frame.
 - Measure white balance on a neutral surface (an asphalt patch), not on whole-frame averages:
