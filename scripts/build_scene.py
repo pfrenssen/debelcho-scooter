@@ -33,7 +33,6 @@ TERRAIN_SUBDIV = 400
 FAR_RADIUS = 30000.0  # the far terrain is a polar grid from the edge of the near terrain to here
 RANGE_START = (10000.0, 16000.0)  # the peaks rise over this distance band
 PEAK_HEIGHT = 2400.0
-HAZE_DISTANCE = 20000.0  # aerial perspective e-folding distance on the far terrain
 TREELINE = 1300.0
 SNOWLINE = 1700.0
 SUN_GAP = (20.0, 45.0)  # degrees either side of the sun azimuth: no peaks inside, full beyond
@@ -143,6 +142,12 @@ SUN_SIDE_SLOPE = 0.6
 SUN_AZIMUTH = 15.0  # degrees from +X towards +Y; the ride starts heading +X, into the sunset
 HAZE_DENSITY = 0.006  # at the haze base; falls off with height
 HAZE_HEIGHT = 20.0  # metres per e-fold of the density
+HAZE_HALF = TERRAIN_SIZE / 2 - 5.0  # the haze box spans this either side of the origin
+# Distance fog on every surface beyond the haze box (DistanceFog): extinction per metre at
+# height 0, falling off with height, towards the sky colour at the horizon.
+FOG_DENSITY = 0.004
+FOG_HEIGHT = 100.0  # metres per e-fold of the density
+SKY_STRENGTH = 0.18
 DOF_FSTOP = 2.8
 CLOUD_SCALE = 1.2
 CLOUD_COVER = 0.45  # noise threshold where clouds begin; lower is more cloud
@@ -807,12 +812,10 @@ def terrain_material():
 
 def alpine_material():
     """Far terrain: forest below the treeline, rock above it and on steep faces, snow above the
-    snowline on gentler slopes. Fades to a haze colour with distance (aerial perspective), as
-    the haze volume only reaches a few hundred metres."""
+    snowline on gentler slopes."""
     mat = make_material("Alpine", (0.17, 0.15, 0.14), 0.85)
     nt = mat.node_tree
     bsdf = principled_node(mat)
-    out = next(n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL')
     coord = nt.nodes.new('ShaderNodeTexCoord')
     position = nt.nodes.new('ShaderNodeSeparateXYZ')
     nt.links.new(coord.outputs['Object'], position.inputs[0])
@@ -834,18 +837,6 @@ def alpine_material():
     colour = mix_colour(nt, snow, mix_colour(nt, forest, rock, (0.02, 0.04, 0.02)), (0.85, 0.87, 0.9))
     nt.links.new(colour, bsdf.inputs['Base Color'])
     nt.links.new(mix_colour(nt, snow, (0.85, 0.85, 0.85), (0.45, 0.45, 0.45)), bsdf.inputs['Roughness'])
-
-    camera = nt.nodes.new('ShaderNodeCameraData')
-    falloff = math_node(nt, 'EXPONENT', math_node(nt, 'DIVIDE', camera.outputs['View Distance'], -HAZE_DISTANCE), 0.0)
-    haze = math_node(nt, 'MINIMUM', math_node(nt, 'SUBTRACT', 1.0, falloff), 0.85)
-    glow = nt.nodes.new('ShaderNodeEmission')
-    glow.inputs['Color'].default_value = (0.5, 0.55, 0.72, 1.0)
-    glow.inputs['Strength'].default_value = 0.25
-    mix = nt.nodes.new('ShaderNodeMixShader')
-    nt.links.new(haze, mix.inputs['Fac'])
-    nt.links.new(bsdf.outputs['BSDF'], mix.inputs[1])
-    nt.links.new(glow.outputs['Emission'], mix.inputs[2])
-    nt.links.new(mix.outputs['Shader'], out.inputs['Surface'])
     return mat
 
 
@@ -2108,9 +2099,9 @@ def scatter_rocks(road, mats, coll, rng, ride_x):
 def build_haze(coll):
     """Aerial perspective: a box of forward-scattering volume over the terrain, thinning with
     height. A world volume does not work in EEVEE: it is infinitely deep and blocks the sun."""
-    half, bottom, top = TERRAIN_SIZE / 2 - 5.0, -15.0, 80.0
+    bottom, top = -15.0, 80.0
     b = MeshBuilder()
-    b.box((0, 0, (bottom + top) / 2), (2 * half, 2 * half, top - bottom))
+    b.box((0, 0, (bottom + top) / 2), (2 * HAZE_HALF, 2 * HAZE_HALF, top - bottom))
     mat = bpy.data.materials.new("Haze")
     if mat.node_tree is None:
         mat.use_nodes = True
@@ -2133,6 +2124,82 @@ def build_haze(coll):
     haze.display_type = 'BOUNDS'
 
 
+def fog_group():
+    """Shader group that fades a surface towards the sky at the horizon in the view direction,
+    with the extinction of a fog layer FOG_DENSITY · exp(-z / FOG_HEIGHT) along the part of the
+    view ray beyond the haze box; the haze volume covers the part inside it. The optical depth
+    over a segment of length L from height z0 rising by Δz is
+    FOG_DENSITY · exp(-z0 / H) · L · (1 - exp(-x)) / x, with x = Δz / H. Weight scales the fog,
+    for surfaces with alpha."""
+    nt = bpy.data.node_groups.new("DistanceFog", 'ShaderNodeTree')
+    nt.interface.new_socket("Shader", in_out='INPUT', socket_type='NodeSocketShader')
+    nt.interface.new_socket("Weight", in_out='INPUT', socket_type='NodeSocketFloat').default_value = 1.0
+    nt.interface.new_socket("Shader", in_out='OUTPUT', socket_type='NodeSocketShader')
+    inputs = nt.nodes.new('NodeGroupInput')
+    geometry = nt.nodes.new('ShaderNodeNewGeometry')
+    distance = nt.nodes.new('ShaderNodeCameraData').outputs['View Distance']
+    ray = vector_math(nt, 'SCALE', geometry.outputs['Incoming'], -1.0)  # unit, camera to point
+    eye = vector_math(nt, 'SUBTRACT', geometry.outputs['Position'], vector_math(nt, 'SCALE', ray, distance))
+
+    # Where the ray leaves the haze box through its sides; the top is above the haze.
+    wall = vector_math(nt, 'MULTIPLY', vector_math(nt, 'SIGN', ray), (HAZE_HALF, HAZE_HALF, 0.0))
+    exits = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(vector_math(nt, 'DIVIDE', vector_math(nt, 'SUBTRACT', wall, eye), ray), exits.inputs[0])
+    start = math_node(nt, 'MINIMUM', math_node(nt, 'MAXIMUM', math_node(
+        nt, 'MINIMUM', exits.outputs['X'], exits.outputs['Y']), 0.0), distance)
+    length = math_node(nt, 'SUBTRACT', distance, start)
+
+    r = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(ray, r.inputs[0])
+    e = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(eye, e.inputs[0])
+    z0 = math_node(nt, 'ADD', e.outputs['Z'], math_node(nt, 'MULTIPLY', r.outputs['Z'], start))
+    x = math_node(nt, 'DIVIDE', math_node(nt, 'MULTIPLY', r.outputs['Z'], length), FOG_HEIGHT)
+    near_zero = math_node(nt, 'LESS_THAN', math_node(nt, 'ABSOLUTE', x, 0.0), 0.01)
+    x = math_node(nt, 'ADD', x, math_node(nt, 'MULTIPLY', near_zero, math_node(nt, 'SUBTRACT', 0.01, x)))
+    rise = math_node(nt, 'DIVIDE', math_node(nt, 'SUBTRACT', 1.0, math_node(
+        nt, 'EXPONENT', math_node(nt, 'MULTIPLY', x, -1.0), 0.0)), x)
+    density = math_node(nt, 'MULTIPLY', math_node(
+        nt, 'EXPONENT', math_node(nt, 'DIVIDE', z0, -FOG_HEIGHT), 0.0), FOG_DENSITY)
+    depth = math_node(nt, 'MULTIPLY', math_node(nt, 'MULTIPLY', density, length), rise)
+    fog = math_node(nt, 'SUBTRACT', 1.0, math_node(nt, 'EXPONENT', math_node(nt, 'MULTIPLY', depth, -1.0), 0.0))
+
+    horizon = nt.nodes.new('ShaderNodeCombineXYZ')
+    nt.links.new(r.outputs['X'], horizon.inputs['X'])
+    nt.links.new(r.outputs['Y'], horizon.inputs['Y'])
+    nt.links.new(math_node(nt, 'MAXIMUM', r.outputs['Z'], 0.02), horizon.inputs['Z'])
+    sky = sky_texture(nt, sun_disc=False)
+    nt.links.new(horizon.outputs[0], sky.inputs['Vector'])
+    glow = nt.nodes.new('ShaderNodeEmission')
+    glow.inputs['Strength'].default_value = SKY_STRENGTH
+    nt.links.new(sky.outputs['Color'], glow.inputs['Color'])
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    nt.links.new(math_node(nt, 'MULTIPLY', fog, inputs.outputs['Weight']), mix.inputs['Fac'])
+    nt.links.new(inputs.outputs['Shader'], mix.inputs[1])
+    nt.links.new(glow.outputs['Emission'], mix.inputs[2])
+    nt.links.new(mix.outputs['Shader'], nt.nodes.new('NodeGroupOutput').inputs['Shader'])
+    return nt
+
+
+def add_distance_fog():
+    """Put DistanceFog between every material's surface shader and its output, weighted by the
+    Principled alpha where that is textured, so cut-out cards stay transparent."""
+    group = fog_group()
+    for mat in bpy.data.materials:
+        if mat.node_tree is None:
+            continue
+        nt = mat.node_tree
+        alpha = next((p.inputs['Alpha'].links[0].from_socket for p in nt.nodes
+                      if p.type == 'BSDF_PRINCIPLED' and p.inputs['Alpha'].is_linked), None)
+        for out in [n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL' and n.inputs['Surface'].is_linked]:
+            fog = nt.nodes.new('ShaderNodeGroup')
+            fog.node_tree = group
+            nt.links.new(out.inputs['Surface'].links[0].from_socket, fog.inputs['Shader'])
+            if alpha is not None:
+                nt.links.new(alpha, fog.inputs['Weight'])
+            nt.links.new(fog.outputs['Shader'], out.inputs['Surface'])
+
+
 def socket(sockets, name, kind):
     """Socket by name and type, for nodes such as Mix that have several sockets per name."""
     return next(s for s in sockets if s.name == name and s.type == kind)
@@ -2147,6 +2214,20 @@ def math_node(nt, operation, a, b):
         else:
             nt.links.new(value, sock)
     return node.outputs[0]
+
+
+def vector_math(nt, operation, a, b=None):
+    node = nt.nodes.new('ShaderNodeVectorMath')
+    node.operation = operation
+    second = node.inputs['Scale'] if operation == 'SCALE' else node.inputs[1]
+    for sock, value in ((node.inputs[0], a), (second, b)):
+        if value is None:
+            continue
+        if isinstance(value, (float, tuple)):
+            sock.default_value = value
+        else:
+            nt.links.new(value, sock)
+    return node.outputs['Vector']
 
 
 def mix_colour(nt, factor, a, b, blend='MIX'):
@@ -2166,6 +2247,23 @@ def mix_colour(nt, factor, a, b, blend='MIX'):
     return socket(node.outputs, "Result", 'RGBA')
 
 
+def sun_direction():
+    el, az = math.radians(SUN_ELEVATION), math.radians(SUN_AZIMUTH)
+    return Vector((math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)))
+
+
+def sky_texture(nt, sun_disc):
+    """The sunset sky, for the world and for the fog colour."""
+    to_sun = sun_direction()
+    sky = nt.nodes.new('ShaderNodeTexSky')
+    sky.sky_type = 'MULTIPLE_SCATTERING'
+    sky.sun_disc = sun_disc
+    sky.sun_size = math.radians(1.5)
+    sky.sun_elevation = math.radians(SUN_ELEVATION)
+    sky.sun_rotation = math.atan2(to_sun.x, to_sun.y)
+    return sky
+
+
 def build_world(scene):
     """Sunset sky with a cloud layer: noise projected onto a horizontal plane above the scene.
     Clouds take the sky colour, tinted orange towards the sun and violet away from it."""
@@ -2176,15 +2274,8 @@ def build_world(scene):
     nt = world.node_tree
     bg = next((n for n in nt.nodes if n.type == 'BACKGROUND'), None) or nt.nodes.new('ShaderNodeBackground')
     out = next((n for n in nt.nodes if n.type == 'OUTPUT_WORLD'), None) or nt.nodes.new('ShaderNodeOutputWorld')
-    el, az = math.radians(SUN_ELEVATION), math.radians(SUN_AZIMUTH)
-    to_sun = Vector((math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)))
-
-    sky = nt.nodes.new('ShaderNodeTexSky')
-    sky.sky_type = 'MULTIPLE_SCATTERING'
-    sky.sun_disc = True
-    sky.sun_size = math.radians(1.5)
-    sky.sun_elevation = el
-    sky.sun_rotation = math.atan2(to_sun.x, to_sun.y)
+    to_sun = sun_direction()
+    sky = sky_texture(nt, sun_disc=True)
 
     coord = nt.nodes.new('ShaderNodeTexCoord')
     xyz = nt.nodes.new('ShaderNodeSeparateXYZ')
@@ -2223,7 +2314,7 @@ def build_world(scene):
     cloud_colour = mix_colour(nt, 1.0, sky.outputs['Color'], tint, blend='MULTIPLY')
     colour = mix_colour(nt, cover, sky.outputs['Color'], cloud_colour)
 
-    bg.inputs['Strength'].default_value = 0.18
+    bg.inputs['Strength'].default_value = SKY_STRENGTH
     nt.links.new(colour, bg.inputs['Color'])
     nt.links.new(bg.outputs['Background'], out.inputs['Surface'])
 
@@ -3336,6 +3427,7 @@ def main():
     build_grass(mats, env, terrain, (road_obj, gutter), cam, rng)
     build_world(scene)
     build_haze(env)
+    add_distance_fog()
     configure_render(scene)
 
     zs = [p.z for p in road.points if ride_x[0] <= p.x <= ride_x[1]]

@@ -19,9 +19,6 @@ The forest and fog items below are steps towards the look of
 `~/Downloads/Austria-kleinwalsertal-hiking3.jpg` (not in the repository): hills under a dense fir
 forest, paler and greyer with distance, with low cloud caught on the slopes.
 
-- **Distance fog.** A shared node group that fades every material (terrain, trees, barn, road)
-  towards a fog colour with camera distance, more at low height, as `alpine_material` already
-  does for the far terrain. It gives the layered silhouettes that grow paler with distance.
 - **Fog banks.** Low cloud drifting over the slopes: stretched volume ellipsoids within the
   300 m EEVEE volume range, their density from 4D noise × a height falloff × a soft edge, with
   the noise W animated for the drift.
