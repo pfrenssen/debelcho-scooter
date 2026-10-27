@@ -42,7 +42,6 @@ colours = {
     "Cat": (1.0, 1.0, 1.0, 1.0),
     "Ear": (1.0, 1.0, 1.0, 1.0),
     "Eye": (1.0, 1.0, 1.0, 1.0),
-    "SpeedBumps": (1.0, 0.2, 0.2, 1.0),
 }
 for obj in scene.objects:
     obj.color = next((c for key, c in colours.items() if key in obj.name), (0.25, 0.3, 0.25, 1.0))

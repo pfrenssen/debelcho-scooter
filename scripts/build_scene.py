@@ -110,11 +110,15 @@ LANE_OFFSET = -0.45  # metres left of the centre line (negative: right lane)
 BASE_SPEED = 4.5  # m/s
 RIDE_START_X = -22.0
 
-# Speed bumps, as distances along the road from the ride start (m).
-BUMPS = [8.0, 27.0, 46.0, 65.0, 84.0]
-BUMP_HEIGHT = 0.04
-BUMP_LENGTH = 0.35
-ROAD_ROUGHNESS = 0.003
+# Wear of the asphalt (Road.surface): an uneven profile over wavelengths of 0.5 to 4 m, ruts
+# in the car tracks, and shallow potholes and sunken repair patches.
+ROAD_WAVE = 0.012  # amplitude at the 4 m wavelength; each octave down halves it
+RUT_DEPTH = 0.008
+CAR_TRACK = 0.75  # metres either side of the centre line
+# Defects on the scooter's line, as distances along the road from the ride start (m); the
+# others lie off the line, about one every 12 m.
+LINE_DEFECTS = [("pothole", 8.0), ("patch", 27.0), ("pothole", 46.0), ("patch", 65.0), ("pothole", 84.0)]
+ROAD_FINE_STEP = 0.05  # mesh rows along the ride; ROAD_STEP elsewhere
 
 # Suspension: two springs on a body with heave and pitch.
 SPRING_HZ = 3.0
@@ -320,7 +324,7 @@ class Road:
         for i, p in enumerate(self.points):
             self.kd.insert((p.x, p.y, 0.0), i)
         self.kd.balance()
-        self.bumps = []
+        self.defects, self.defect_s = [], []  # set by place_defects
         self.sun_cap = None  # set once the ride is known
         # Distance from the centre line to the right edge, where the asphalt has crumbled away
         # in chips up to 6 cm deep. The left edge is laid straight against the gutter.
@@ -328,13 +332,78 @@ class Road:
                                                      + 0.02 * noise.noise(Vector((s / 0.3, 0.0, 6.7))), 0.0), 0.06)
                            for s in self.cum]
 
-    def bump(self, s):
-        """Height of the road surface above the smooth centre line at arc length s."""
-        h = ROAD_ROUGHNESS * noise.noise(Vector((s * 3.0, 0.0, 7.7)))
-        for b in self.bumps:
-            if abs(s - b) < BUMP_LENGTH / 2:
-                h += BUMP_HEIGHT * math.cos(math.pi * (s - b) / BUMP_LENGTH) ** 2
-        return h
+    def place_defects(self, start, rng):
+        """Potholes and sunken repair patches: LINE_DEFECTS on the scooter's line from the ride
+        start at arc length start, and others off the line, clear of the road markings."""
+        def defect(kind, s, d, small=False):
+            if kind == "pothole":
+                ra, rb = rng.uniform(0.1 if small else 0.17, 0.3), rng.uniform(0.12, 0.22)
+                depth = rng.uniform(0.015 if small else 0.02, 0.035)
+            else:
+                ra, rb, depth = rng.uniform(0.4, 0.8), rng.uniform(0.25, 0.34), rng.uniform(0.008, 0.015)
+            return kind, s, d, ra, rb, depth, rng.uniform(0.0, 100.0)
+
+        defects = [defect(kind, start + along, LANE_OFFSET + rng.uniform(-0.04, 0.04)) for kind, along in LINE_DEFECTS]
+        s = start - 30.0
+        while s < start + 130.0:
+            s += rng.uniform(6.0, 18.0)
+            kind = rng.choice(("pothole", "pothole", "patch"))
+            for _ in range(20):
+                d = rng.uniform(-1.0, 1.0)
+                candidate = defect(kind, s, d, small=True)
+                reach = 1.25 * candidate[4]  # across, with the ragged outline of a pothole
+                if (abs(d - LANE_OFFSET) > reach + 0.12 and abs(d) > reach + 0.05
+                        and abs(d) + reach < ROAD_HALF_WIDTH - 0.2):
+                    defects.append(candidate)
+                    break
+        self.defects = sorted(defects, key=lambda e: e[1])
+        self.defect_s = [e[1] for e in self.defects]
+        print(f"road defects: {len(self.defects)}, {len(LINE_DEFECTS)} on the scooter's line")
+
+        # The scooter's line every centimetre, and the height a wheel's centre rises there: a
+        # rigid wheel bridges the part of a pothole narrower than itself.
+        self.line_s = np.arange(0.0, self.cum[-1], 0.01)
+        profile = np.array([self.surface(s, LANE_OFFSET)[0] for s in self.line_s])
+        reach = int(WHEEL_R / 0.01)
+        padded = np.pad(profile, reach, mode='edge')
+        self.line_wheel = np.full_like(profile, -np.inf)
+        for k in range(-reach, reach + 1):
+            lift = math.sqrt(max(WHEEL_R ** 2 - (0.01 * k) ** 2, 0.0)) - WHEEL_R
+            self.line_wheel = np.maximum(self.line_wheel, padded[reach + k:reach + k + len(profile)] + lift)
+
+    def surface(self, s, d):
+        """Height of the worn asphalt above the smooth road at arc length s, d metres left of the
+        centre line, and how far the point lies inside a pothole and inside a repair patch (0 to 1)."""
+        h, amp, wave = 0.0, ROAD_WAVE, 4.0
+        for k in range(4):
+            h += amp * noise.noise(Vector((s / wave, d / (1.5 * wave), 11.3 + k)))
+            amp, wave = amp / 2.0, wave / 2.0
+        for track in (-CAR_TRACK, CAR_TRACK):
+            h -= RUT_DEPTH * math.exp(-((d - track) / 0.25) ** 2) * (0.6 + 0.6 * noise.noise(Vector((s / 7.0, track, 3.3))))
+        # The edges stay level with the gutter and the verge.
+        h *= smoothstep(ROAD_HALF_WIDTH - 0.06, ROAD_HALF_WIDTH - 0.4, abs(d))
+        pothole = patch = 0.0
+        first = bisect.bisect_left(self.defect_s, s - 1.0)
+        for kind, s0, d0, ra, rb, depth, seed in self.defects[first:bisect.bisect_right(self.defect_s, s + 1.0)]:
+            u, v = (s - s0) / ra, (d - d0) / rb
+            if kind == "pothole":
+                r = math.hypot(u, v)
+                if r > 1.3:
+                    continue
+                ragged = 1.0 + 0.2 * noise.noise(Vector((1.3 * u / max(r, 1e-6), 1.3 * v / max(r, 1e-6), seed)))
+                inside = smoothstep(1.0, 0.8, r / ragged)
+                h -= depth * inside * (0.8 + 0.3 * noise.noise(Vector((s / 0.1, d / 0.1, seed))))
+                pothole = max(pothole, inside)
+            else:
+                inside = smoothstep(1.0, 0.96, max(abs(u), abs(v)))
+                h -= depth * inside * (0.6 + 0.4 * (1.0 - u * u))  # settled most in the middle
+                patch = max(patch, inside)
+        return h, pothole, patch
+
+    def wheel(self, s):
+        """How far a wheel's centre on the scooter's line at arc length s rises above its height on
+        the smooth road."""
+        return float(np.interp(s, self.line_s, self.line_wheel))
 
     def sample(self, s):
         """Position, unit tangent and horizontal left normal at arc length s."""
@@ -706,7 +775,6 @@ def build_materials():
         "inner_ear": make_material("InnerEar", (0.10, 0.05, 0.05), 0.55),
         "whisker": make_material("Whisker", (0.8, 0.8, 0.77), 0.35),
         "kerchief": kerchief_material(),
-        "bump_yellow": make_material("BumpYellow", (0.9, 0.65, 0.02), 0.6),
         "spring": make_material("Spring", (0.12, 0.12, 0.13), 0.3, metallic=1.0),
         "strands": strand_material(),
         "ear_tufts": make_material("EarTufts", (0.12, 0.115, 0.11), 0.4),  # pale hairs inside the ears
@@ -848,13 +916,41 @@ def alpine_material():
 
 
 def asphalt_material():
-    """Asphalt texture; the road UVs run along the road in metres."""
+    """Asphalt texture; the road UVs run along the road in metres. Vertex attributes 'pothole'
+    and 'patch' are 1 inside a pothole and a repair patch (Road.surface): the patches are of
+    darker, newer binder with a sealed seam, the potholes have a broken edge of paler stone and
+    loose grit in the bottom."""
     mat = make_material("Asphalt", (0.04, 0.04, 0.04), 0.9)
     nt = mat.node_tree
     uv = nt.nodes.new('ShaderNodeUVMap')
     uv.uv_map = "UVMap"
-    apply_texture(nt, principled_node(mat), texture_set(nt, "asphalt_02", 3.0, uv.outputs['UV']))
+    colour, rough, normal = texture_set(nt, "asphalt_02", 3.0, uv.outputs['UV'])
+    patch, pothole = nt.nodes.new('ShaderNodeAttribute'), nt.nodes.new('ShaderNodeAttribute')
+    patch.attribute_name, pothole.attribute_name = "patch", "pothole"
+    colour =mix_colour(nt, patch.outputs['Fac'], colour, mix_colour(nt, 1.0, colour, (0.6, 0.6, 0.6), 'MULTIPLY'))
+    rough = mix_colour(nt, patch.outputs['Fac'], rough, mix_colour(nt, 1.0, rough, (0.85, 0.85, 0.85), 'MULTIPLY'))
+    seam = smooth_range(nt, edge_band(nt, patch.outputs['Fac']), 0.4, 0.8)
+    colour = mix_colour(nt, seam, colour, (0.015, 0.015, 0.015))
+
+    # aerial_rocks_02 at this size reads as grit; grey it to the crushed stone of the base course.
+    grit = texture_set(nt, "aerial_rocks_02", 0.2, uv.outputs['UV'])
+    grey = nt.nodes.new('ShaderNodeHueSaturation')
+    grey.inputs['Saturation'].default_value = 0.2
+    nt.links.new(grit[0], grey.inputs['Color'])
+    grit[0] = mix_colour(nt, 1.0, grey.outputs['Color'], (0.3, 0.3, 0.3), 'MULTIPLY')
+    bottom = smooth_range(nt, pothole.outputs['Fac'], 0.5, 0.9)
+    colour, rough, normal = (mix_colour(nt, bottom, a, b) for a, b in zip((colour, rough, normal), grit))
+    broken = smooth_range(nt, edge_band(nt, pothole.outputs['Fac']), 0.3, 0.8)
+    colour = mix_colour(nt, broken, colour, (0.11, 0.105, 0.1))
+    apply_texture(nt, principled_node(mat), [colour, rough, normal])
     return mat
+
+
+def edge_band(nt, mask):
+    """1 halfway across the border of a 0-to-1 mask, falling to 0 inside and outside it."""
+    centred = math_node(nt, 'MULTIPLY_ADD', mask, 2.0)
+    centred.node.inputs[2].default_value = -1.0
+    return math_node(nt, 'SUBTRACT', 1.0, math_node(nt, 'ABSOLUTE', centred, 0.0))
 
 
 def stretched_noise(nt, vector, scale, detail=5.0):
@@ -1327,23 +1423,49 @@ def grass_density(road, x, y, ride_x):
     return along * smoothstep(0.05, 0.3, edge) * lerp(1.0, 0.06, smoothstep(2.0, 20.0, edge))
 
 
-def build_road(road, mats, coll):
-    """Asphalt with skirts running down into the ground on both sides, the right edge crumbled
-    (Road.right_edge), and the road markings. Returns the asphalt object."""
+def build_road(road, mats, coll, ride_x):
+    """Worn asphalt (Road.surface) with skirts running down into the ground on both sides, the
+    right edge crumbled (Road.right_edge), and the road markings. Rows are ROAD_FINE_STEP apart
+    along the ride and columns 4 cm apart across the right lane, so the potholes keep their
+    edges. Returns the asphalt object."""
     w = ROAD_HALF_WIDTH
-    verts, faces, uvs = [], [], []
+    fine = (road.arc_length_at_x(ride_x[0]) - 30.0, road.arc_length_at_x(ride_x[1]) + 30.0)
+    rows = [0.0]
+    while rows[-1] < road.cum[-1]:
+        rows.append(rows[-1] + (ROAD_FINE_STEP if fine[0] <= rows[-1] <= fine[1] else ROAD_STEP))
+    rows[-1] = road.cum[-1]
+    right, left = 38, 11  # columns from the right edge to 0.2 m left of the centre line, and on to the left edge
+    verts, faces, uvs, potholes, patches = [], [], [], [], []
     low = Vector((0, 0, -0.25))
-    for p, nrm, s, e in zip(road.points, road.normals, road.cum, road.right_edge):
-        verts += [p + nrm * (w + 0.15) + low, p + nrm * w, p - nrm * e, p - nrm * (e + 0.15) + low]
-        uvs += [(s, w + 0.15), (s, w), (s, -e), (s, -e - 0.15)]
-    for i in range(len(road.points) - 1):
-        a, b = 4 * i, 4 * (i + 1)
-        for k in range(3):
+    for s in rows:
+        p, _, nrm = road.sample(s)
+        e = float(np.interp(s, road.cum, road.right_edge))
+        across = [lerp(0.2, w, k / left) for k in range(left, 0, -1)] + [lerp(-e, 0.2, k / right) for k in range(right, -1, -1)]
+        verts.append(p + nrm * (w + 0.15) + low)
+        uvs.append((s, w + 0.15))
+        for d in across:
+            h, pothole, patch = road.surface(s, d)
+            verts.append(p + nrm * d + Vector((0, 0, h)))
+            uvs.append((s, d))
+            potholes.append(pothole)
+            patches.append(patch)
+        verts.append(p - nrm * (e + 0.15) + low)
+        uvs.append((s, -e - 0.15))
+    n = len(across) + 2
+    for i in range(len(rows) - 1):
+        a, b = n * i, n * (i + 1)
+        for k in range(n - 1):
             faces.append((a + k, a + k + 1, b + k + 1, b + k))
     mesh = bpy.data.meshes.new("Road")
     mesh.from_pydata(verts, [], faces)
     mesh.materials.append(mats["asphalt"])
+    mesh.shade_smooth()
+    mesh.set_sharp_from_angle(angle=math.radians(40.0))  # the edges down to the skirts
     set_uvs(mesh, uvs)
+    # The skirts are outside every defect.
+    for name, values in (("pothole", potholes), ("patch", patches)):
+        set_attribute(mesh, name, [v for row in range(len(rows)) for v in [0.0, *values[row * (n - 2):(row + 1) * (n - 2)], 0.0]])
+    print(f"road: {len(verts)} vertices")
     road_obj = link(bpy.data.objects.new("Road", mesh), coll)
 
     # Dashed centre line, 0.9 m dashes every 2 m, and solid edge lines. The centre line wears
@@ -1368,7 +1490,7 @@ def build_road(road, mats, coll):
         for i in indices:
             p, nrm = road.points[i] + up, road.normals[i]
             for v in (PAINT_HALF_WIDTH, -PAINT_HALF_WIDTH):
-                verts.append(p + nrm * (offset + v))
+                verts.append(p + nrm * (offset + v) + Vector((0, 0, road.surface(road.cum[i], offset + v)[0])))
                 uvs.append((road.cum[i], v))
                 vert_wear.append(wear[i])
         for k in range(len(indices) - 1):
@@ -1519,35 +1641,6 @@ def build_guard_stones(road, mats, coll, cam_path):
         s += rng.uniform(2.0, 3.0)
     print(f"guard stones: {count}, {skipped} left out near the camera path or in the sun's path")
     b.to_object("GuardStones", [mats["granite"]], coll)
-
-
-def build_speed_bumps(road, mats, coll):
-    """Rubber humps across the road, striped yellow and black."""
-    stripes, steps = 10, 14
-    verts, faces, face_mats = [], [], []
-    for b in road.bumps:
-        base = len(verts)
-        for k in range(steps + 1):
-            ds = -BUMP_LENGTH / 2 + BUMP_LENGTH * k / steps
-            centre, _, nrm = road.sample(b + ds)
-            centre.z += road.bump(b + ds) - ROAD_ROUGHNESS + 0.001
-            for j in range(stripes + 1):
-                verts.append(centre + nrm * lerp(-min(road.right_edge), ROAD_HALF_WIDTH, j / stripes))
-        for k in range(steps):
-            for j in range(stripes):
-                a = base + k * (stripes + 1) + j
-                faces.append((a, a + 1, a + stripes + 2, a + stripes + 1))
-                face_mats.append(j % 2)
-        for j in (0, stripes):
-            side = [base + k * (stripes + 1) + j for k in range(steps + 1)]
-            faces.append(tuple(side if j else reversed(side)))
-            face_mats.append(1)
-    mesh = bpy.data.meshes.new("SpeedBumps")
-    mesh.from_pydata(verts, [], faces)
-    mesh.polygons.foreach_set("material_index", face_mats)
-    mesh.materials.append(mats["bump_yellow"])
-    mesh.materials.append(mats["rubber"])
-    link(bpy.data.objects.new("SpeedBumps", mesh), coll)
 
 
 def build_barn(road, mats, coll):
@@ -3236,13 +3329,13 @@ class Suspension:
         dt = ds / v / SUBSTEPS
         for k in range(SUBSTEPS):
             sk = s + ds * (k + 1) / SUBSTEPS
-            u = [road.bump(sk + x) for x in self.AXLES]
-            u_v = [(road.bump(sk + x + 0.01) - road.bump(sk + x - 0.01)) / 0.02 * v for x in self.AXLES]
+            u = [road.wheel(sk + x) for x in self.AXLES]
+            u_v = [(road.wheel(sk + x + 0.01) - road.wheel(sk + x - 0.01)) / 0.02 * v for x in self.AXLES]
             self.step(u, u_v, dt)
 
 
 def pose_suspension(scooter, susp, road, s, frame):
-    u_front, u_rear = (road.bump(s + x) for x in Suspension.AXLES)
+    u_front, u_rear = (road.wheel(s + x) for x in Suspension.AXLES)
     body = scooter.body
     body.location = (0.0, 0.0, susp.heave)
     body.rotation_euler = (0.0, -math.atan(susp.slope), 0.0)
@@ -3294,7 +3387,7 @@ def animate(scene, road, scooter, cam, cat):
     head_rig, tail = cat.head, cat.tail
     ear_rest = [ear.rotation_euler.copy() for ear in cat.ears]
     breath_phase = 0.0
-    s = road.arc_length_at_x(RIDE_START_X)
+    s = start = road.arc_length_at_x(RIDE_START_X)
     v = BASE_SPEED
     lean = 0.0
     travelled = 0.0
@@ -3303,7 +3396,7 @@ def animate(scene, road, scooter, cam, cat):
     ride_x = []
     cam_path = []
     susp = Suspension()
-    bump_frames = []
+    defect_frames = []
     body_lean = 0.0
 
     for frame in range(1, FRAME_END + 1):
@@ -3334,8 +3427,8 @@ def animate(scene, road, scooter, cam, cat):
             wheel.keyframe_insert("rotation_euler", frame=frame)
 
         pose_suspension(scooter, susp, road, s, frame)
-        if any(abs(s + FRONT_AXLE.x - b) < v / FPS / 2 for b in road.bumps):
-            bump_frames.append(frame)
+        if any(abs(s + FRONT_AXLE.x - (start + along)) < v / FPS / 2 for _, along in LINE_DEFECTS):
+            defect_frames.append(frame)
 
         # The cat leans into climbs and back on descents, crouches a little uphill, and absorbs
         # the bumps by dropping its hips; IK keeps the paws on the grips and the feet planted.
@@ -3395,7 +3488,8 @@ def animate(scene, road, scooter, cam, cat):
             eye.scale = (1.0, 1.0, sz)
             eye.keyframe_insert("scale", frame=f)
 
-    print(f"ride: x {ride_x[0]:.1f} -> {ride_x[-1]:.1f}, distance {travelled:.1f} m, bumps at frames {bump_frames}")
+    print(f"ride: x {ride_x[0]:.1f} -> {ride_x[-1]:.1f}, distance {travelled:.1f} m, "
+          f"defects on the line at frames {defect_frames}")
     return (ride_x[0], ride_x[-1]), cam_path
 
 
@@ -3512,8 +3606,7 @@ def main():
     env = make_collection("Environment")
     actors = make_collection("Actors")
 
-    start = road.arc_length_at_x(RIDE_START_X)
-    road.bumps = [start + d for d in BUMPS]
+    road.place_defects(road.arc_length_at_x(RIDE_START_X), random.Random(SEED + 6))
 
     scooter = build_scooter(mats, actors)
     cat = build_cat(mats, actors, scooter.body)
@@ -3524,13 +3617,12 @@ def main():
 
     terrain = build_terrain(road, mats, env, ride_x, cam_path)
     build_far_terrain(road, mats, env)
-    road_obj = build_road(road, mats, env)
+    road_obj = build_road(road, mats, env, ride_x)
     ground = ground_probe(terrain)
     gutter = build_gutter(road, mats, env, ground)
     build_drains(road, mats, env)
     build_verge_dirt(road, mats, env, ground)
     build_guard_stones(road, mats, env, cam_path)
-    build_speed_bumps(road, mats, env)
     build_barn(road, mats, env)
     scatter_trees(road, env, rng, ride_x, cam_path)
     scatter_rocks(road, mats, env, rng, ride_x)

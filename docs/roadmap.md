@@ -19,7 +19,8 @@ the shot.
   trunks and fluttering branches need per-vertex deformation; doing that as shader displacement
   made the Radeon 680M time out and reset during animation renders.
 - **Wheel interaction.** The scooter pushes the verge grass aside and raises a faint dust trail.
-- **Road detail.** A gravel shoulder, worn tyre tracks, repair patches and a slight crown.
+- **Road detail.** A gravel shoulder, a slight crown, and cracks in the geometry (the cracks
+  now come only from the asphalt texture).
 - **Terrain erosion.** Run a hydraulic erosion pass on the near height grid for gullies, ridges
   and smoother valley floors.
 - **Vegetation variety.** Bushes, wildflowers and fallen needles on the verges; a second tree
