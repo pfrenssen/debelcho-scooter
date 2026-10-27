@@ -29,6 +29,12 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
   and tail), add clumping and some flyaway strands.
 - **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
   them so each toe wraps the grip.
+- **Notice the camera.** Around frame 260 the cat should briefly glance towards the camera on
+  its left, as if it notices or acknowledges the camera's presence. This will break the fixed
+  head position throughout the entire clip and give more life to the scene.
+- **Small movements.** Apart from leaning forwards and backwards the cat is mostly motionless.
+  It should move its left elbow at some point, for example after hitting a speed bump, and
+  also make another small moment in another point, like hunching its shoulders a bit.
 
 ## Environment
 
