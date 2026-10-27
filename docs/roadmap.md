@@ -5,10 +5,27 @@ the shot.
 
 ## Cat
 
+The face reads as a cartoon. The items below take it apart one feature at a time; judge each
+on a close-up still in Cycles as well as EEVEE, since the fur strands shade differently in the two.
+
+- **Eyes.** Drop the emission that makes them glow at dusk. Give the iris radial fibres and a
+  gradient from amber round the pupil to green at the rim, and widen the pupil to the oval it
+  is in the evening light instead of a 1.6 mm slit. Frame each eye with dark eyelid rims that
+  set its almond shape, and seat it in a socket so the lids wrap round it.
+- **Face fur.** The 6 mm head strands stand straight out like a brush. Shorten them to 3–4 mm,
+  lay them flat along the skin, and comb them in the flow of a real coat: from the nose back
+  over the forehead and out over the cheeks, with a longer ruff on the cheeks.
+- **Ears.** Replace the straight cones with a thin curved shell: a rolled rim, an open cup
+  inside and the small fold at the base of the outer edge. Swap the brush of pale bristles in
+  the cup for sparse, fine hair.
+- **Whiskers.** Thinner, tapering to a fine tip and a little translucent, in more rows on the
+  whisker pads; shorter and fewer above the eyes.
+- **Skull.** The head is overlapping ellipsoids. Add eye sockets, a step from the forehead to
+  the nose, cheekbones, and a muzzle and chin that stand out from the face.
 - **Sun on the climb.** From frame 85 to 165 the cat climbs a stretch steeper than the 4° sun,
   so the road ahead shades it. Easing that grade, or a light linked to the cat for those frames,
   would keep it in the sun.
-- **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
+- **Body fur grooming.** Vary the length by region (shorter on the paws, longer on the chest
   and tail), add clumping and some flyaway strands.
 - **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
   them so each toe wraps the grip.
