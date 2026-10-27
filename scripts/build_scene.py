@@ -37,6 +37,9 @@ HAZE_DISTANCE = 20000.0  # aerial perspective e-folding distance on the far terr
 TREELINE = 1300.0
 SNOWLINE = 1700.0
 SUN_GAP = (20.0, 45.0)  # degrees either side of the sun azimuth: no peaks inside, full beyond
+HILL_HEIGHT = 200.0  # the forested foothills rise by about this much over HILL_BAND, outside HILL_GAP
+HILL_BAND = (100.0, 700.0)  # metres from the origin
+HILL_GAP = (33.0, 70.0)  # as SUN_GAP; the forest starts at 33°, so the slopes inside stay low
 ROAD_HALF_WIDTH = 1.3
 ROAD_BLEND = 3.5
 ROAD_SINK = 0.06  # terrain under the road sits this far below the road surface
@@ -219,10 +222,17 @@ def fbm(x, y, octaves=5, z=0.37):
     return total
 
 
-def away_from_sun(x, y):
-    """0 in the direction of the setting sun, 1 beyond SUN_GAP degrees either side of it."""
+def away_from_sun(x, y, limits=SUN_GAP):
+    """0 in the direction of the setting sun, 1 beyond limits degrees either side of it."""
     gap = abs(wrap_angle(math.atan2(y, x) - math.radians(SUN_AZIMUTH)))
-    return smoothstep(math.radians(SUN_GAP[0]), math.radians(SUN_GAP[1]), gap)
+    return smoothstep(math.radians(limits[0]), math.radians(limits[1]), gap)
+
+
+def hill_rise(x, y):
+    """The forested slopes beyond the meadows: HILL_HEIGHT over HILL_BAND away from the sunset,
+    with spurs and hollows from noise."""
+    rise = smoothstep(*HILL_BAND, math.hypot(x, y)) * away_from_sun(x, y, HILL_GAP)
+    return HILL_HEIGHT * rise * (0.75 + 0.5 * fbm(x / 400.0, y / 400.0, octaves=3, z=3.7))
 
 
 def base_height(x, y):
@@ -231,7 +241,7 @@ def base_height(x, y):
     h = 12.0 * fbm(x / 35.0, y / 35.0)
     ring = smoothstep(55.0, 125.0, math.hypot(x, y)) * smoothstep(8.0, 35.0, abs(y - centre_y(x)))
     height = lerp(10.0, 30.0, away_from_sun(x, y))
-    return h + ring * height * (0.75 + 0.35 * fbm(x / 60.0 + 5.0, y / 60.0 + 5.0, octaves=3))
+    return h + ring * (height * (0.75 + 0.35 * fbm(x / 60.0 + 5.0, y / 60.0 + 5.0, octaves=3)) + hill_rise(x, y))
 
 
 def far_height(x, y):
@@ -239,7 +249,7 @@ def far_height(x, y):
     the sun sets. ridged_multi_fractal spans about 0.15-1.9 (median 1.16)."""
     r = math.hypot(x, y)
     open_side = away_from_sun(x, y)
-    foothills = 30.0 + 600.0 * smoothstep(250.0, 8000.0, r) * (0.3 + 0.7 * open_side) \
+    foothills = 30.0 + hill_rise(x, y) + 600.0 * smoothstep(250.0, 8000.0, r) * (0.3 + 0.7 * open_side) \
         * (0.6 + 0.4 * fbm(x / 2500.0, y / 2500.0, octaves=4, z=11.1))
     ridges = noise.ridged_multi_fractal(Vector((x / 6000.0, y / 6000.0, 0.5)), 1.0, 2.0, 8, 1.0, 2.0,
                                         noise_basis='PERLIN_ORIGINAL')

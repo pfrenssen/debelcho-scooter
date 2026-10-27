@@ -19,8 +19,6 @@ The forest and fog items below are steps towards the look of
 `~/Downloads/Austria-kleinwalsertal-hiking3.jpg` (not in the repository): hills under a dense fir
 forest, paler and greyer with distance, with low cloud caught on the slopes.
 
-- **Taller hills.** The foothills behind the barn rise only 10 to 30 m. Raise and steepen them,
-  so the forested slope fills the background.
 - **Distance fog.** A shared node group that fades every material (terrain, trees, barn, road)
   towards a fog colour with camera distance, more at low height, as `alpine_material` already
   does for the far terrain. It gives the layered silhouettes that grow paler with distance.
