@@ -5,10 +5,9 @@ the shot.
 
 ## Cat
 
-- **Sun on the cat.** The 4° sun is behind the terrain, 30 to 90 m away, in every frame, so the
-  cat gets only the dim sky light and renders as a black silhouette, in Cycles even with the
-  hair shader. In direct sun the Cycles fur shows its gloss and texture, as in
-  `~/Downloads/IMG_20230519_184720.jpg` (not in the repository).
+- **Sun on the climb.** From frame 85 to 165 the cat climbs a stretch steeper than the 4° sun,
+  so the road ahead shades it. Easing that grade, or a light linked to the cat for those frames,
+  would keep it in the sun.
 - **Fur grooming.** Vary the length by region (shorter on the face and paws, longer on the chest
   and tail), add clumping and some flyaway strands.
 - **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
@@ -47,5 +46,4 @@ forest, paler and greyer with distance, with low cloud caught on the slopes.
   GTX 1060 6GB) a 1280×720 frame takes 65 s with 27 min of CPU time. Time a GPU-only and a
   CPU-only frame on each machine to find the fastest device set.
 - **Final render in Cycles.** The 480-frame clip takes about 8.7 hours on the workstation and
-  about 18 hours on the laptop. It needs **Sun on the cat** first: without it the cat renders
-  as a flat black silhouette.
+  about 18 hours on the laptop, measured before the forest and the grass culling.

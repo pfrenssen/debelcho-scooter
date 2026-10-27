@@ -63,6 +63,7 @@ FOREST_SPACING = 3.5  # grid the forest firs are jittered on: the crowns touch
 FOREST_RADIUS = 600.0
 FOREST_LOD4 = 90.0  # beyond this distance from the camera path the forest firs are cone stacks
 FAR_FIRS = 3  # cone-stack variants
+FIR_HEIGHT = 19.0  # the tallest of the fir models at scale 1
 # Hay barn in the Kleinwalsertal style on the slope right of the road, a background detail.
 BARN_SITE = (15.0, -15.0)  # in frame from the start to the front shots; the ground falls 1.5 m across it
 BARN_YAW = 0.0  # the long wall with the hay racks faces the road
@@ -129,6 +130,13 @@ EAR_ROOT = 0.012  # how far each ear runs on into the skull below its base
 TAIL_BASE = Vector((-0.13, 0.0, 0.21))
 
 SUN_ELEVATION = 4.0
+# The ground towards the sun stays below the sun line from the cat (SunCap), from SUN_CAP_START
+# metres out, with up to SUN_CLEARANCE to spare (less near the cat), in a corridor SUN_CORRIDOR
+# wide either side of the ride, whose sides rise at SUN_SIDE_SLOPE.
+SUN_CAP_START = 2.0
+SUN_CLEARANCE = 0.5
+SUN_CORRIDOR = 3.0
+SUN_SIDE_SLOPE = 0.6
 SUN_AZIMUTH = 15.0  # degrees from +X towards +Y; the ride starts heading +X, into the sunset
 HAZE_DENSITY = 0.006  # at the haze base; falls off with height
 HAZE_HEIGHT = 20.0  # metres per e-fold of the density
@@ -170,6 +178,12 @@ def smoothstep(e0, e1, x):
 
 def lerp(a, b, t):
     return a + (b - a) * t
+
+
+def smooth_min(a, b, k):
+    """Minimum of a and b, rounded over a band of width k where they meet."""
+    h = min(max(0.5 + 0.5 * (b - a) / k, 0.0), 1.0)
+    return lerp(b, a, h) - k * h * (1.0 - h)
 
 
 def wrap_angle(a):
@@ -285,6 +299,7 @@ class Road:
             self.kd.insert((p.x, p.y, 0.0), i)
         self.kd.balance()
         self.bumps = []
+        self.sun_cap = None  # set once the ride is known
         # Distance from the centre line to the right edge, where the asphalt has crumbled away
         # in chips up to 6 cm deep. The left edge is laid straight against the gutter.
         self.right_edge = [ROAD_HALF_WIDTH - min(max(0.025 + 0.04 * noise.noise(Vector((s / 0.8, 0.0, 4.1)))
@@ -326,10 +341,59 @@ class Road:
     def terrain_height(self, x, y):
         idx, edge, left = self.edge_distance(x, y, GUTTER_SHOULDER)
         base = base_height(x, y)
-        if edge >= ROAD_BLEND:
-            return base
-        road = self.points[idx].z - (GUTTER_SINK if left else ROAD_SINK)
-        return lerp(road, base, smoothstep(0.0, ROAD_BLEND, edge))
+        if edge < ROAD_BLEND:
+            road = self.points[idx].z - (GUTTER_SINK if left else ROAD_SINK)
+            base = lerp(road, base, smoothstep(0.0, ROAD_BLEND, edge))
+        # Lower the ground into the sun's path, away from the road and its embankments.
+        return self.sun_capped(x, y, base, smoothstep(0.3, 2.0, edge))
+
+    def sun_capped(self, x, y, height, weight=1.0):
+        if self.sun_cap is None or weight <= 0.0:
+            return height
+        cap = self.sun_cap.at(x, y)
+        if cap >= height + 1.0:
+            return height
+        return lerp(height, smooth_min(height, cap, 1.0), weight)
+
+
+class SunCap:
+    """Highest the ground may be so the setting sun reaches the cat all through the ride: from
+    each ride point the ground towards the sun stays below the sun line, from
+    SUN_CAP_START out, rising at SUN_SIDE_SLOPE beyond SUN_CORRIDOR either side. Sampled on a
+    grid every `step` metres; no limit outside it."""
+
+    NONE = 1.0e6
+
+    def __init__(self, ride, reach=900.0, step=2.0):
+        a = math.radians(SUN_AZIMUTH)
+        sun = np.array((math.cos(a), math.sin(a)))
+        rise = math.tan(math.radians(SUN_ELEVATION))
+        ride = np.array([tuple(p) for p in ride])
+        ends = np.vstack((ride[:, :2], ride[:, :2] + reach * sun))
+        self.lo = ends.min(axis=0) - 50.0
+        self.step = step
+        shape = np.ceil((ends.max(axis=0) + 50.0 - self.lo) / step).astype(int) + 1
+        x = self.lo[0] + step * np.arange(shape[0])
+        y = self.lo[1] + step * np.arange(shape[1])
+        gx, gy = np.meshgrid(x, y)
+        self.cap = np.full(gx.shape, self.NONE)
+        for px, py, pz in ride:
+            dx, dy = gx - px, gy - py
+            along = dx * sun[0] + dy * sun[1]
+            across = np.abs(dx * sun[1] - dy * sun[0])
+            clearance = np.minimum(SUN_CLEARANCE, 0.1 + 0.02 * along)
+            limit = pz + along * rise - clearance + np.maximum(across - SUN_CORRIDOR, 0.0) * SUN_SIDE_SLOPE
+            self.cap = np.minimum(self.cap, np.where(along > SUN_CAP_START, limit, self.NONE))
+
+    def at(self, x, y):
+        u, v = (x - self.lo[0]) / self.step, (y - self.lo[1]) / self.step
+        i, j = int(u), int(v)
+        if not (0 <= i < self.cap.shape[1] - 1 and 0 <= j < self.cap.shape[0] - 1):
+            return self.NONE
+        fu, fv = u - i, v - j
+        c = self.cap
+        return ((c[j, i] * (1 - fu) + c[j, i + 1] * fu) * (1 - fv)
+                + (c[j + 1, i] * (1 - fu) + c[j + 1, i + 1] * fu) * fv)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -1089,8 +1153,9 @@ def kerchief_material():
 
 
 def strand_material():
-    """Glossy black fur strands that turn slightly grey towards the tips."""
-    mat = make_material("FurStrands", (0.006, 0.006, 0.007), 0.4)
+    """Glossy black fur strands that turn slightly grey towards the tips. In EEVEE the strip
+    normals face the camera, so in direct sun a sharper, stronger highlight shows as glitter."""
+    mat = make_material("FurStrands", (0.006, 0.006, 0.007), 0.6, inputs={"Specular IOR Level": 0.3})
     nt = mat.node_tree
     info = nt.nodes.new('ShaderNodeHairInfo')
     ramp = nt.nodes.new('ShaderNodeValToRGB')
@@ -1212,7 +1277,7 @@ def build_terrain(road, mats, coll, ride_x, cam_path):
     return link(bpy.data.objects.new("Terrain", mesh), coll)
 
 
-def build_far_terrain(mats, coll):
+def build_far_terrain(road, mats, coll):
     """Polar grid from just inside the near terrain's edge out to FAR_RADIUS, with radial
     spacing growing geometrically. Its inner edge follows base_height so the two meshes meet."""
     inner, rings, segments = 120.0, 260, 1200
@@ -1222,7 +1287,7 @@ def build_far_terrain(mats, coll):
         for k in range(segments):
             a = 2.0 * math.pi * k / segments
             x, y = r * math.cos(a), r * math.sin(a)
-            verts.append((x, y, far_ground(x, y)))
+            verts.append((x, y, road.sun_capped(x, y, far_ground(x, y))))
     faces = [(i * segments + k, i * segments + (k + 1) % segments,
               (i + 1) * segments + (k + 1) % segments, (i + 1) * segments + k)
              for i in range(rings) for k in range(segments)]
@@ -1435,12 +1500,16 @@ def build_guard_stones(road, mats, coll, cam_path):
             half = max(STONE_SIZE[:2]) / 2
             ground = min(road.terrain_height(centre.x + dx, centre.y + dy) for dx in (-half, half) for dy in (-half, half))
             size = [c * rng.uniform(0.9, 1.1) for c in STONE_SIZE]
+            if ground + size[2] > road.sun_cap.at(centre.x, centre.y):  # it would shade the cat
+                skipped += 1
+                s += rng.uniform(2.0, 3.0)
+                continue
             m = (T(centre.x, centre.y, ground) @ R(math.atan2(tan.y, tan.x) + rng.uniform(-0.15, 0.15), 'Z')
                  @ R(rng.uniform(-0.06, 0.06), 'X') @ R(rng.uniform(-0.06, 0.06), 'Y'))
             b.hewn_box(m, (size[0], size[1], size[2] + 0.15), rng, bury=0.15)
             count += 1
         s += rng.uniform(2.0, 3.0)
-    print(f"guard stones: {count}, {skipped} left out near the camera path")
+    print(f"guard stones: {count}, {skipped} left out near the camera path or in the sun's path")
     b.to_object("GuardStones", [mats["granite"]], coll)
 
 
@@ -1723,7 +1792,7 @@ def ground_height(road, x, y):
     """Height of whichever terrain mesh lies at x, y."""
     if max(abs(x), abs(y)) < TERRAIN_SIZE / 2:
         return road.terrain_height(x, y)
-    return far_ground(x, y)
+    return road.sun_capped(x, y, far_ground(x, y))
 
 
 def forest_cover(x, y, cam_distance):
@@ -1760,21 +1829,33 @@ def forest_points(road, cam_path):
     grid = HeightGrid(road, FOREST_RADIUS, 3.0)
     seen = in_view.copy()
     seen[in_view] = unoccluded(top[in_view], cam_path, grid)
-    points, variant = [], []
+    points, variant, scale = [], [], []
+    shading = 0
     for (x, y, z), visible in zip(candidates, seen):
         if not visible:
             continue
         slope = math.hypot(ground_height(road, x + 1.0, y) - ground_height(road, x - 1.0, y),
                            ground_height(road, x, y + 1.0) - ground_height(road, x, y - 1.0)) / 2.0
-        if slope < 1.7:
-            points.append((x, y, z - 0.3))
-            far = cam_kd.find((x, y, 0.0))[2] > FOREST_LOD4
-            variant.append(9 + rng.randrange(FAR_FIRS) if far else 6 + rng.randrange(3))
+        if slope >= 1.7:
+            continue
+        size = rng.uniform(0.45, 0.9)
+        if not below_sun_line(road, x, y, z - 0.3, size):
+            shading += 1
+            continue
+        points.append((x, y, z - 0.3))
+        scale.append(size)
+        far = cam_kd.find((x, y, 0.0))[2] > FOREST_LOD4
+        variant.append(9 + rng.randrange(FAR_FIRS) if far else 6 + rng.randrange(3))
     near = sum(v < 9 for v in variant)
     print(f"forest: {len(candidates)} firs in the stands, {int(in_view.sum())} in view, {int(seen.sum())} not "
-          f"hidden by the ground, {len(points)} on slopes under 60°: {near} LOD3, {len(points) - near} far")
-    n = len(points)
-    return points, variant, [rng.uniform(0, 2 * math.pi) for _ in range(n)], [rng.uniform(0.45, 0.9) for _ in range(n)]
+          f"hidden by the ground, {len(points)} on slopes under 60° and clear of the sun line ({shading} not): "
+          f"{near} LOD3, {len(points) - near} far")
+    return points, variant, [rng.uniform(0, 2 * math.pi) for _ in points], scale
+
+
+def below_sun_line(road, x, y, base, scale):
+    """Whether a fir of the given scale standing at base keeps below the sun cap."""
+    return base + FIR_HEIGHT * scale < road.sun_cap.at(x, y)
 
 
 def scatter_trees(road, coll, rng, ride_x, cam_path):
@@ -1806,7 +1887,7 @@ def scatter_trees(road, coll, rng, ride_x, cam_path):
     # trees keep their places.
     cam_kd = camera_kd(cam_path)
     keep = [k for k, p in enumerate(points) if math.hypot(p[0] - BARN_SITE[0], p[1] - BARN_SITE[1]) > 8.0
-            and cam_kd.find((p[0], p[1], 0.0))[2] < FOREST_START]
+            and cam_kd.find((p[0], p[1], 0.0))[2] < FOREST_START and below_sun_line(road, p[0], p[1], p[2], scale[k])]
     print(f"scattered trees kept: {len(keep)} of {len(points)}")
     points, variant, yaw, scale = ([values[k] for k in keep] for values in (points, variant, yaw, scale))
     for values, more in zip((points, variant, yaw, scale), forest_points(road, cam_path)):
@@ -2006,7 +2087,8 @@ def scatter_rocks(road, mats, coll, rng, ride_x):
         if not ROAD_HALF_WIDTH + 1.2 < d < 14.0:
             continue
         size = rng.uniform(0.15, 0.6)
-        m = (T(x, y, road.terrain_height(x, y) - size * 0.3) @ R(rng.uniform(0, 6.3), 'Z')
+        z = min(road.terrain_height(x, y) - size * 0.3, road.sun_cap.at(x, y) - size * 0.8)  # sunk out of the sun's path
+        m = (T(x, y, z) @ R(rng.uniform(0, 6.3), 'Z')
              @ S(size * rng.uniform(0.8, 1.4), size, size * rng.uniform(0.5, 0.8)))
         rocks.ico(m, 1.0, mat=0)
         count += 1
@@ -3227,9 +3309,10 @@ def main():
 
     cam = build_camera(scene, scooter.target)
     ride_x, cam_path = animate(scene, road, scooter, cam, cat)
+    road.sun_cap = SunCap([target for _, target, _ in cam_path[::6]])  # the camera looks at the cat
 
     terrain = build_terrain(road, mats, env, ride_x, cam_path)
-    build_far_terrain(mats, env)
+    build_far_terrain(road, mats, env)
     road_obj = build_road(road, mats, env)
     ground = ground_probe(terrain)
     gutter = build_gutter(road, mats, env, ground)
