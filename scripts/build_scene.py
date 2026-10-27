@@ -776,7 +776,7 @@ def build_materials():
         "lid_rim": make_material("LidRim", (0.003, 0.003, 0.003), 0.55),
         "nose": make_material("CatNose", (0.03, 0.028, 0.03), 0.5),
         "inner_ear": make_material("InnerEar", (0.02, 0.011, 0.009), 0.55),  # dark reddish-brown, after the photo
-        "whisker": make_material("Whisker", (0.8, 0.8, 0.77), 0.35),
+        "whisker": whisker_material(),
         "kerchief": kerchief_material(),
         "spring": make_material("Spring", (0.12, 0.12, 0.13), 0.3, metallic=1.0),
         "strands": strand_material(),
@@ -1299,6 +1299,29 @@ def strand_material():
     tips.inputs['To Max'].default_value = 0.88
     nt.links.new(info.outputs['Intercept'], tips.inputs['Value'])
     cycles_hair(mat, tips.outputs['Result'], 0.25)
+    return mat
+
+
+def whisker_material():
+    """Pale, glossy and a little translucent, after the photo; the whisker fades out over its
+    outer part (the Curves Info intercept), so the tip ends fine instead of blunt."""
+    mat = make_material("Whisker", (0.78, 0.77, 0.72), 0.3)
+    nt = mat.node_tree
+    bsdf = principled_node(mat)
+    out = next(n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL')
+    info = nt.nodes.new('ShaderNodeHairInfo')
+    translucent = nt.nodes.new('ShaderNodeBsdfTranslucent')
+    translucent.inputs['Color'].default_value = (0.78, 0.77, 0.72, 1.0)
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    mix.inputs['Fac'].default_value = 0.3
+    nt.links.new(bsdf.outputs['BSDF'], mix.inputs[1])
+    nt.links.new(translucent.outputs['BSDF'], mix.inputs[2])
+    fade = smooth_range(nt, info.outputs['Intercept'], 1.0, 0.5)
+    alpha = nt.nodes.new('ShaderNodeMixShader')
+    nt.links.new(math_node(nt, 'MULTIPLY', fade, 0.85), alpha.inputs['Fac'])
+    nt.links.new(nt.nodes.new('ShaderNodeBsdfTransparent').outputs['BSDF'], alpha.inputs[1])
+    nt.links.new(mix.outputs['Shader'], alpha.inputs[2])
+    nt.links.new(alpha.outputs['Shader'], out.inputs['Surface'])
     return mat
 
 
@@ -3234,15 +3257,26 @@ def build_tail(mats, coll, cat_rig):
     return curve
 
 
-def whisker(b, start, direction, length, droop, radius):
-    """A tapering whisker of three segments from start along direction, bending by droop (in
-    units of the length) towards the tip."""
-    direction = direction.normalized()
-    points = [start + direction * length * t + droop * length * t * t for t in (0.0, 0.33, 0.66, 1.0)]
-    radii = [radius * f for f in (1.0, 0.74, 0.48, 0.2)]
-    for p0, p1, r0, r1 in zip(points, points[1:], radii, radii[1:]):
-        d = p1 - p0
-        b.cylinder(Matrix.Translation((p0 + p1) / 2) @ align_z(d), r0, d.length, 0, segments=5, radius2=r1)
+def whisker_object(name, strands, material, collection, parent, origin):
+    """Hair curves of whiskers, with the object origin at origin (in the head frame, like
+    MeshBuilder). Each strand (start, direction, length, droop, radius) runs from start along
+    direction, bends by droop (in units of the length) towards the tip and tapers from radius
+    to a point."""
+    points = 8
+    curves = bpy.data.hair_curves.new(name)
+    curves.add_curves([points] * len(strands))
+    coords, radii = [], []
+    for start, direction, length, droop, radius in strands:
+        direction = direction.normalized()
+        for k in range(points):
+            t = k / (points - 1)
+            coords.extend(start + direction * length * t + droop * length * t * t - origin)
+            radii.append(radius * (1.0 - 0.97 * t ** 1.5))
+    curves.position_data.foreach_set('vector', coords)
+    radius = curves.attributes.get('radius') or curves.attributes.new('radius', 'FLOAT', 'POINT')
+    radius.data.foreach_set('value', radii)
+    curves.materials.append(material)
+    return link(bpy.data.objects.new(name, curves), collection, parent, origin - NECK)
 
 
 def ear_shell(s):
@@ -3515,28 +3549,32 @@ def build_head(mats, coll, cat_rig):
         hit, normal, _, _ = bvh.ray_cast(centre - NECK, p - centre)
         return hit + NECK - normal * depth
 
-    # Long, fine whiskers fanning out of the whisker pads, tapering and drooping to the tips.
+    # Fine whiskers in four staggered rows of three on each whisker pad, after the photo: the
+    # rows fan from slightly up to well down, the rear ones longest, all curving down to the tips.
     whiskers = []
+    rng = random.Random(SEED + 7)
     for s in (-1, 1):
         root = Vector((0.185, s * 0.024, 0.568))
-        w = MeshBuilder(root)
-        for k, (x, z, rise, length) in enumerate(((0.188, 0.574, 0.15, 0.105), (0.181, 0.575, 0.08, 0.115),
-                                                  (0.188, 0.568, 0.02, 0.12), (0.181, 0.569, -0.04, 0.118),
-                                                  (0.188, 0.562, -0.1, 0.11), (0.181, 0.563, -0.16, 0.1),
-                                                  (0.186, 0.557, -0.22, 0.09))):
-            start = under_skin(Vector((x, s * (0.022 + 0.6 * (0.19 - x)), z)), Vector((0.165, s * 0.012, 0.568)))
-            whisker(w, start, Vector((0.3, s, rise)), length, Vector((-0.25, 0, -0.18)), 0.0005)
-        whiskers.append(w.to_object("WhiskersL" if s > 0 else "WhiskersR", [mats["whisker"]], coll, head_rig,
-                                    root - NECK))
+        strands = []
+        for row, (z, rise, row_length) in enumerate(((0.575, 0.14, 0.85), (0.569, 0.04, 1.0), (0.563, -0.06, 0.95),
+                                                     (0.557, -0.14, 0.8))):
+            for x, forward, column_length, radius in ((0.189, 0.5, 0.7, 0.00014), (0.184, 0.3, 0.88, 0.00017),
+                                                      (0.179, 0.15, 1.0, 0.0002)):
+                x += 0.0025 * (row % 2)
+                start = under_skin(Vector((x, s * (0.022 + 0.6 * (0.19 - x)), z)), Vector((0.165, s * 0.012, 0.568)))
+                direction = Vector((forward + rng.uniform(-0.05, 0.05), s, rise + rng.uniform(-0.04, 0.04)))
+                length = 0.115 * row_length * column_length * rng.uniform(0.92, 1.08)
+                strands.append((start, direction, length, Vector((-0.2, 0, -0.25)), radius))
+        whiskers.append(whisker_object("WhiskersL" if s > 0 else "WhiskersR", strands, mats["whisker"], coll,
+                                       head_rig, root))
 
-    # Shorter whiskers above the eyes, from the inner brow, curving up and back.
+    # Two short whiskers above each eye, from the inner brow, curving up and outwards.
     for s in (-1, 1):
-        w = MeshBuilder(NECK)
-        for k, (spread, rise, length) in enumerate(((0.3, 1.0, 0.05), (0.5, 0.9, 0.045), (0.7, 0.8, 0.04),
-                                                    (0.9, 0.6, 0.035))):
-            start = under_skin(Vector((0.172, s * (0.02 + 0.004 * k), 0.629)), Vector((0.12, 0, 0.61)))
-            whisker(w, start, Vector((0.35, s * spread, rise)), length, Vector((-0.5, s * 0.2, -0.25)), 0.0003)
-        w.to_object("BrowWhiskersL" if s > 0 else "BrowWhiskersR", [mats["whisker"]], coll, head_rig)
+        strands = []
+        for k, (spread, rise, length) in enumerate(((0.5, 0.9, 0.032), (0.85, 0.6, 0.026))):
+            start = under_skin(Vector((0.172, s * (0.021 + 0.006 * k), 0.629)), Vector((0.12, 0, 0.61)))
+            strands.append((start, Vector((0.35, s * spread, rise)), length, Vector((-0.4, s * 0.25, -0.3)), 0.0001))
+        whisker_object("BrowWhiskersL" if s > 0 else "BrowWhiskersR", strands, mats["whisker"], coll, head_rig, NECK)
 
     # Large upright ears, set high and wide at the base: thin shells (ear_shell) that run on
     # EAR_ROOT into the skull, so the base stays inside the head where the skull curves away
