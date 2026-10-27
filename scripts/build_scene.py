@@ -128,7 +128,8 @@ SUBSTEPS = 10
 CAT_PIVOT = Vector((-0.04, 0.0, 0.117))  # in the cat's modelling frame; see CAT_OFFSET
 NECK = Vector((0.09, 0.0, 0.52))
 EYE_CENTRE = Vector((0.166, 0.031, 0.613))  # left eye; the right one mirrors it
-EYE_RADII = (0.013, 0.0155, 0.0105)  # depth, width, height in the eye's own frame
+EYE_RADII = (0.013, 0.0155, 0.012)  # depth, width, height in the eye's own frame
+EYE_TURN = (0.2, 0.35)  # left eye: tilt about X (outer corner up) and turn about Z (outwards)
 CORNEA_BULGE = 1.05  # the cornea's depth as a multiple of the eye's
 IRIS_DEPTH = 0.7  # the flat iris sits this fraction of the eye's depth in front of its centre
 NOSE_CENTRE = Vector((0.192, 0.0, 0.586))
@@ -771,6 +772,7 @@ def build_materials():
         "fur": make_material("BlackFur", (0.008, 0.008, 0.009), 0.9),  # skin under the fur strands
         "eye": eye_material(),
         "cornea": cornea_material(),
+        "lid_rim": make_material("LidRim", (0.003, 0.003, 0.003), 0.55),
         "nose": make_material("CatNose", (0.03, 0.028, 0.03), 0.5),
         "inner_ear": make_material("InnerEar", (0.10, 0.05, 0.05), 0.55),
         "whisker": make_material("Whisker", (0.8, 0.8, 0.77), 0.35),
@@ -3139,6 +3141,106 @@ def whisker(b, start, direction, length, droop, radius):
         b.cylinder(Matrix.Translation((p0 + p1) / 2) @ align_z(d), r0, d.length, 0, segments=5, radius2=r1)
 
 
+def eye_matrix(s):
+    """The eye's own frame in the head rig (s = 1 for the left eye, -1 for the right): +X out of
+    the eye, +Z up."""
+    return T(*(EYE_CENTRE * Vector((1, s, 1)) - NECK)) @ R(s * EYE_TURN[1], 'Z') @ R(s * EYE_TURN[0], 'X')
+
+
+class EyeLids:
+    """The almond opening of the lids and the skin of the lids round it, in the eye's own frame.
+    Across the eye, (u, v) are in units of the eye's width and height, +u towards the outer
+    corner; the inner corner sits lower and points down towards the nose. The lid skin runs
+    from a rounded dark rim on the cornea out to REACH times the opening, where it meets the
+    head; 'grow' is how far a point lies out from the opening, as a fraction of the opening."""
+
+    REACH = 0.6
+    GROWS = (0.0, 0.004, 0.012, 0.03, 0.07, 0.13, 0.21, 0.31, 0.43, 0.6)
+    RIM_ROWS = 5  # the first rows are the dark rim of the lid
+
+    def __init__(self, n=96):
+        t = np.linspace(-1.0, 1.0, n // 2 + 1)
+        u = np.interp(t, (-1, 1), (-0.92, 0.86))
+        middle = np.interp(t, (-1, 1), (-0.18, 0.04))
+        lower = middle - 0.72 * (1 - t ** 2) ** 0.85
+        upper = middle + 0.8 * (1 - t ** 2) ** 0.75
+        self.outline = np.concatenate((np.stack((u, lower), 1), np.stack((u, upper), 1)[-2:0:-1]))
+        self.centre = self.outline.mean(axis=0)
+        rel = self.outline - self.centre
+        alpha = np.arctan2(rel[:, 1], rel[:, 0])
+        order = np.argsort(alpha)
+        self.alpha, self.rho = alpha[order], np.hypot(rel[:, 0], rel[:, 1])[order]
+
+    @staticmethod
+    def to_uv(p, s):
+        return s * p.y / EYE_RADII[1], p.z / EYE_RADII[2]
+
+    @staticmethod
+    def to_frame(u, v, x, s):
+        return Vector((x, s * u * EYE_RADII[1], v * EYE_RADII[2]))
+
+    @staticmethod
+    def cornea_x(u, v):
+        return EYE_RADII[0] * CORNEA_BULGE * math.sqrt(max(0.0, 1.0 - (u / 1.03) ** 2 - (v / 1.03) ** 2))
+
+    def grow(self, u, v):
+        """How far (u, v) lies out from the opening, and the point of the opening in its direction."""
+        du, dv = u - self.centre[0], v - self.centre[1]
+        rho = np.interp(math.atan2(dv, du), self.alpha, self.rho, period=2 * math.pi)
+        r = math.hypot(du, dv)
+        edge = (self.centre[0] + du * rho / r, self.centre[1] + dv * rho / r) if r > 0 else tuple(self.centre)
+        return r / rho - 1.0, edge
+
+    def skin_x(self, edge, grow, head_x):
+        """Height of the lid skin above the eye's centre plane, from the rim on the cornea at the
+        opening's edge out to the head surface at head_x."""
+        lip = self.cornea_x(*edge) + 0.0001
+        if grow <= 0.0:
+            return lip
+        if grow < 0.012:
+            return lip + 0.0007
+        return lerp(lip + 0.0011, head_x - 0.0004, smoothstep(0.03, self.REACH, grow))
+
+    def seat(self, p, s):
+        """Head point p (eye frame) pressed back behind the lid skin and the eye: the socket."""
+        u, v = self.to_uv(p, s)
+        grow, edge = self.grow(u, v)
+        if grow >= self.REACH:
+            return p
+        if grow <= 0.0:
+            ball = EYE_RADII[0] * min(IRIS_DEPTH, math.sqrt(max(0.0, 1.0 - u * u - v * v)))
+            limit = ball - 0.0008
+        else:
+            limit = self.skin_x(edge, grow, p.x) - 0.0008
+        return Vector((min(p.x, limit), p.y, p.z))
+
+    def skin(self, s, head_bvh, frame):
+        """Mesh of the lid skin in the eye frame, its rows meeting the head (head_bvh, in the
+        head rig, before the socket was pressed in) at the outer edge."""
+        b = MeshBuilder()
+        rows = []
+        for k, grow in enumerate(self.GROWS):
+            row = []
+            for o in self.outline:
+                u, v = self.centre + (o - self.centre) * (1.0 + grow)
+                hit = head_bvh.ray_cast(frame @ self.to_frame(u, v, 0.05, s), frame.to_3x3() @ Vector((-1, 0, 0)))[0]
+                head_x = (frame.inverted() @ hit).x if hit else self.cornea_x(*o) - 0.002
+                row.append(b.bm.verts.new(self.to_frame(u, v, self.skin_x(o, grow, head_x), s)))
+            rows.append(row)
+        n = len(self.outline)
+        for k, (r0, r1) in enumerate(zip(rows, rows[1:])):
+            for i in range(n):
+                face = b.bm.faces.new((r0[i], r0[(i + 1) % n], r1[(i + 1) % n], r1[i]))
+                face.material_index = 0 if k < self.RIM_ROWS - 1 else 1
+                face.smooth = True
+        b.bm.normal_update()
+        b.bm.faces.ensure_lookup_table()
+        face = b.bm.faces[-n // 4]
+        if face.normal.dot(face.calc_center_median()) < 0:  # face out of the eye
+            bmesh.ops.reverse_faces(b.bm, faces=b.bm.faces[:])
+        return b
+
+
 def build_head(mats, coll, cat_rig):
     head_rig = make_empty("HeadRig", coll, cat_rig, NECK - CAT_PIVOT, size=0.05)
     head_rig.scale = (1.12, 1.12, 1.12)
@@ -3156,6 +3258,16 @@ def build_head(mats, coll, cat_rig):
         b.ellipsoid((0.166, s * 0.031, 0.627), (0.014, 0.018, 0.007), 0, rot=R(s * 0.2, 'X'))  # brow
     head = b.to_object("CatHead", [mats["fur"]], coll, head_rig)
     remesh(head, 0.003, 6)
+
+    # Eye sockets: the head is pressed back behind the lids and the eyes, so the lids wrap
+    # round the eyes and the brows no longer hood them.
+    lids = EyeLids()
+    frames = {s: eye_matrix(s) for s in (-1, 1)}
+    head_bvh = BVHTree.FromObject(head, bpy.context.evaluated_depsgraph_get())
+    for v in head.data.vertices:
+        for s, frame in frames.items():
+            v.co = frame @ lids.seat(frame.inverted() @ v.co, s)
+    head.data.update()
 
     # Mouth line: from under the nose down the philtrum, then out and down to each corner,
     # projected onto the muzzle along -X.
@@ -3182,13 +3294,14 @@ def build_head(mats, coll, cat_rig):
         mouth_points.insert(p, k)
     mouth_points.balance()
 
-    # No fur on the eyes and the nose leather, and only a little along the mouth line.
-    bare = [(EYE_CENTRE * Vector((1, s, 1)), 0.016, 0.022) for s in (-1, 1)]
-    bare.append((NOSE_CENTRE, 0.009, 0.015))
+    # No fur on the eyes, the lids and the nose leather, and only a little along the mouth line.
     group = head.vertex_groups.new(name="FurDensity")
     for v in head.data.vertices:
-        p = v.co + NECK
-        density = min(smoothstep(r0, r1, (p - c).length) for c, r0, r1 in bare)
+        density = smoothstep(0.009, 0.015, (v.co + NECK - NOSE_CENTRE).length)
+        for s, frame in frames.items():
+            p = frame.inverted() @ v.co
+            if p.x > -0.004:  # the face round the eye, not the back of the head behind it
+                density = min(density, smoothstep(0.06, 0.35, lids.grow(*lids.to_uv(p, s))[0]))
         density = min(density, smoothstep(0.0015, 0.0035, mouth_points.find(v.co)[2]))
         group.add([v.index], density, 'REPLACE')
     add_fur(head, mats, 3500, 0.006, (-1.2, 0.0, 0.0), density_group=group.name)
@@ -3266,9 +3379,9 @@ def build_head(mats, coll, cat_rig):
         add_fur(ear, mats, 120, 0.008, (0.0, 0.0, 0.5), density_group=tufts.name, strands="ear_tufts")
         ears.append(pivot)
 
-    # Almond eyes: ellipsoids set into the head under the brows, turned a little outwards and
-    # with the outer corner up. The object frame is the eye's own, which the iris and the slit
-    # pupil of the eye material are drawn in.
+    # Eyes: ellipsoids seated in the sockets under the brows, turned a little outwards and with
+    # the outer corner up. The object frame is the eye's own, which the iris and the pupil of
+    # the eye material and the almond opening of the lids are drawn in.
     eyes = []
     for s in (-1, 1):
         c = EYE_CENTRE * Vector((1, s, 1))
@@ -3276,9 +3389,12 @@ def build_head(mats, coll, cat_rig):
         e.ellipsoid((0, 0, 0), EYE_RADII, 0, segments=48, rings=24)
         for v in e.bm.verts:  # the iris is a flat disc, set back behind the cornea
             v.co.x = min(v.co.x, IRIS_DEPTH * EYE_RADII[0])
-        eye = e.to_object("EyeL" if s > 0 else "EyeR", [mats["eye"]], coll, head_rig, c - NECK)
-        eye.rotation_euler = (s * 0.2, 0.0, s * 0.35)
-        # The cornea bulges out in front of the iris; as a child of the eye it blinks with it.
+        side = "L" if s > 0 else "R"
+        eye = e.to_object("Eye" + side, [mats["eye"]], coll, head_rig, c - NECK)
+        eye.rotation_euler = (s * EYE_TURN[0], 0.0, s * EYE_TURN[1])
+        # The lids and the cornea are children of the eye, so they close with it in the blinks.
+        lids.skin(s, head_bvh, frames[s]).to_object("Lids" + side, [mats["lid_rim"], mats["fur"]], coll, eye)
+        # The cornea bulges out in front of the iris.
         cornea = MeshBuilder()
         cornea.ellipsoid((0, 0, 0), (EYE_RADII[0] * CORNEA_BULGE, EYE_RADII[1] * 1.03, EYE_RADII[2] * 1.03), 0,
                          segments=48, rings=24)
