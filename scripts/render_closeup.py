@@ -2,19 +2,38 @@
 
 Usage:
     blender -b build/cat_scooter.blend --python scripts/render_closeup.py \
-        -o //preview/closeup_#### -F PNG -f 20 -- X Y Z TARGET_X TARGET_Z [nofur] [lit]
+        -o //preview/closeup_#### -F PNG -f 20 -- VIEW [nofur] [lit] [preview]
+    blender -b build/cat_scooter.blend --python scripts/render_closeup.py \
+        -o //preview/closeup_#### -F PNG -f 20 -- X Y Z TARGET_X TARGET_Z [nofur] [lit] [preview]
 
-X Y Z is the camera position and (TARGET_X, 0, TARGET_Z) the point it looks at, both in the
-scooter frame (+X forward, +Y left, +Z up, origin on the ground below the deck).
-nofur hides the particle hair to show the body shape; lit adds a soft light at the camera.
+VIEW is one of the named views in VIEWS. X Y Z is the camera position and (TARGET_X, 0,
+TARGET_Z) the point it looks at, both in the scooter frame (+X forward, +Y left, +Z up, origin
+on the ground below the deck). nofur hides the particle hair to show the body shape; lit adds a
+soft light at the camera; preview sets the preview quality of CLAUDE.md (50 % resolution,
+16 samples). For Cycles, pass scripts/render_cycles.py before this script, so preview sets
+the samples after it.
 """
 
 import sys
 
 import bpy
 
+# Camera position and target (x, z) in the scooter frame.
+VIEWS = {
+    "head-q": (0.55, 0.2, 0.66, 0.13, 0.6),  # whole head, three-quarter from the left
+    "head-side": (0.14, 0.42, 0.64, 0.13, 0.6),
+    "head-front": (0.5, 0.0, 0.64, 0.13, 0.6),
+    "head-near": (0.4, 0.13, 0.64, 0.14, 0.6),  # face fills the frame
+    "eyes": (0.5, 0.18, 0.63, 0.15, 0.605),  # both eyes, from the side the cat looks to at frame 300
+    "ears-q": (0.4, 0.12, 0.72, 0.11, 0.69),  # into the cups
+    "ears-back": (-0.05, 0.3, 0.74, 0.11, 0.69),
+}
+
 args = sys.argv[sys.argv.index("--") + 1:]
-x, y, z, tx, tz = map(float, args[:5])
+if args[0] in VIEWS:
+    x, y, z, tx, tz = VIEWS[args[0]]
+else:
+    x, y, z, tx, tz = map(float, args[:5])
 scene = bpy.context.scene
 rig = bpy.data.objects["ScooterRig"]
 
@@ -50,3 +69,11 @@ if "lit" in args:
     scene.collection.objects.link(lamp)
     lamp.parent = cam
     lamp.location = (0.3, 0.4, 0.0)
+
+if "preview" in args:
+    scene.render.resolution_percentage = 50
+    scene.eevee.taa_render_samples = 16
+    scene.cycles.samples = 16
+
+print(f"CLOSEUP camera=({x}, {y}, {z}) target=({tx}, 0, {tz}) engine={scene.render.engine} "
+      f"{scene.render.resolution_percentage}% options={[a for a in args if a in ('nofur', 'lit', 'preview')]}")
