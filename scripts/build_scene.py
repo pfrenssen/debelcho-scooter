@@ -148,6 +148,13 @@ HAZE_HALF = TERRAIN_SIZE / 2 - 5.0  # the haze box spans this either side of the
 FOG_DENSITY = 0.004
 FOG_HEIGHT = 100.0  # metres per e-fold of the density
 SKY_STRENGTH = 0.18
+# Fog banks: low cloud caught on the forested slopes, as volume ellipsoids within the EEVEE
+# volume range of every camera position, with wisps from noise drifting downwind.
+FOG_BANKS = 8
+BANK_RADII = (70.0, 25.0, 14.0)  # along the slope's contour, across it, vertical; scaled 0.7 to 1.3
+BANK_DENSITY = 0.15  # extinction per metre in the thickest wisps
+BANK_NOISE = 30.0  # metres, the size of the wisps
+BANK_DRIFT = 1.5  # m/s downwind
 DOF_FSTOP = 2.8
 CLOUD_SCALE = 1.2
 CLOUD_COVER = 0.45  # noise threshold where clouds begin; lower is more cloud
@@ -2124,6 +2131,109 @@ def build_haze(coll):
     haze.display_type = 'BOUNDS'
 
 
+def fog_bank_material():
+    """Wisps of 4D noise drifting downwind at BANK_DRIFT, inside a soft-edged unit sphere in
+    object space, thinning towards its top."""
+    mat = bpy.data.materials.new("FogBank")
+    if mat.node_tree is None:
+        mat.use_nodes = True
+    nt = mat.node_tree
+    for node in [n for n in nt.nodes if n.type != 'OUTPUT_MATERIAL']:
+        nt.nodes.remove(node)
+    out = next(n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL')
+    volume = nt.nodes.new('ShaderNodeVolumePrincipled')
+    volume.inputs['Color'].default_value = (0.92, 0.94, 0.97, 1.0)
+    volume.inputs['Anisotropy'].default_value = 0.4
+
+    seconds = nt.nodes.new('ShaderNodeValue')  # shader nodes have no scene time
+    seconds.outputs[0].driver_add("default_value").driver.expression = f"frame / {FPS}"
+    position = nt.nodes.new('ShaderNodeNewGeometry').outputs['Position']
+    drift = vector_math(nt, 'SCALE', wind_direction(), math_node(nt, 'MULTIPLY', seconds.outputs[0], BANK_DRIFT))
+    wisps = nt.nodes.new('ShaderNodeTexNoise')
+    wisps.noise_dimensions = '4D'
+    wisps.inputs['Scale'].default_value = 1.0 / BANK_NOISE
+    wisps.inputs['Detail'].default_value = 4.0
+    wisps.inputs['Roughness'].default_value = 0.6
+    nt.links.new(vector_math(nt, 'SUBTRACT', position, drift), wisps.inputs['Vector'])
+    nt.links.new(math_node(nt, 'MULTIPLY', seconds.outputs[0], 0.03), wisps.inputs['W'])
+
+    local = nt.nodes.new('ShaderNodeTexCoord').outputs['Object']
+    radius = nt.nodes.new('ShaderNodeVectorMath')
+    radius.operation = 'LENGTH'
+    nt.links.new(local, radius.inputs[0])
+    xyz = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(local, xyz.inputs[0])
+    shape = math_node(nt, 'MULTIPLY', smooth_range(nt, radius.outputs['Value'], 1.0, 0.55),
+                      smooth_range(nt, xyz.outputs['Z'], 0.9, -0.3))
+    # The noise spreads only about ±0.06 round 0.5.
+    density = math_node(nt, 'MULTIPLY', math_node(nt, 'MULTIPLY', smooth_range(nt, wisps.outputs['Fac'], 0.47, 0.56),
+                                                   shape), BANK_DENSITY)
+    nt.links.new(density, volume.inputs['Density'])
+    nt.links.new(volume.outputs['Volume'], out.inputs['Volume'])
+    return mat
+
+
+def framed(points, cam_path, every=4):
+    """How many sampled frames show each of the points (an N×3 array) in the middle of the
+    frame's width, between a little below its centre and near its top: where the background
+    slopes are in the shots."""
+    count = np.zeros(len(points), dtype=int)
+    for c, target, lens in cam_path[::every]:
+        forward = (target - c).normalized()
+        right = forward.cross(Vector((0, 0, 1))).normalized()
+        up = right.cross(forward)
+        half_w = 18.0 / lens  # 36 mm sensor across the frame
+        d = points - np.array(c)
+        depth = d @ np.array(forward)
+        x = d @ np.array(right) / np.maximum(depth, 1.0) / half_w
+        y = d @ np.array(up) / np.maximum(depth, 1.0) / (half_w * 9.0 / 16.0)
+        count += (depth > 1.0) & (np.abs(x) < 0.8) & (y > -0.2) & (y < 0.7)
+    return count
+
+
+def build_fog_banks(road, coll, cam_path):
+    """FOG_BANKS ellipsoids on the forested slopes outside HILL_GAP, at least FOREST_START from
+    the camera path and within 250 m of every camera position, so the 300 m EEVEE volume range
+    takes in the whole bank. The sites are those the shots frame most often over the ground
+    (framed, unoccluded). Each lies along the slope's contour, its lower part in the forest."""
+    rng = random.Random(SEED + 5)
+    cams = np.array([tuple(c) for c, _, _ in cam_path])
+    cam_kd = camera_kd(cam_path)
+    candidates = []
+    for x in range(-250, 251, 10):
+        for y in range(-250, 251, 10):
+            if away_from_sun(x, y, HILL_GAP) < 0.9 or cam_kd.find((x, y, 0.0))[2] < FOREST_START:
+                continue
+            if np.max(np.hypot(cams[:, 0] - x, cams[:, 1] - y)) > 250.0:
+                continue
+            gx = (ground_height(road, x + 2.0, y) - ground_height(road, x - 2.0, y)) / 4.0
+            gy = (ground_height(road, x, y + 2.0) - ground_height(road, x, y - 2.0)) / 4.0
+            if math.hypot(gx, gy) > 0.15:
+                candidates.append((x, y, ground_height(road, x, y), math.atan2(gy, gx) + math.pi / 2))
+    centres = np.array([c[:3] for c in candidates]) + np.array((0.0, 0.0, 5.0))
+    score = framed(centres, cam_path) * unoccluded(centres, cam_path, HeightGrid(road, 260.0, 3.0))
+    # Best framed first, ties in random order.
+    order = sorted(range(len(candidates)), key=lambda k: (-score[k], rng.random()))
+    sites = []
+    for k in order:
+        c = candidates[k]
+        if score[k] > 0 and all(math.hypot(c[0] - s[0], c[1] - s[1]) > 70.0 for s in sites):
+            sites.append(c)
+        if len(sites) == FOG_BANKS:
+            break
+    b = MeshBuilder()
+    b.ellipsoid((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+    mesh = b.to_mesh("FogBank", [fog_bank_material()])
+    for k, (x, y, z, yaw) in enumerate(sites):
+        size = rng.uniform(0.7, 1.3)
+        bank = link(bpy.data.objects.new(f"FogBank.{k}", mesh), coll, location=(x, y, z + 0.4 * BANK_RADII[2] * size))
+        bank.rotation_euler = (0.0, 0.0, yaw)
+        bank.scale = tuple(r * size for r in BANK_RADII)
+        bank.display_type = 'BOUNDS'
+    print(f"fog banks: {len(sites)} of {len(candidates)} candidate sites, framed in "
+          f"{sorted((int(score[candidates.index(s)]) for s in sites), reverse=True)} sampled frames")
+
+
 def fog_group():
     """Shader group that fades a surface towards the sky at the horizon in the view direction,
     with the extinction of a fog layer FOG_DENSITY · exp(-z / FOG_HEIGHT) along the part of the
@@ -3427,6 +3537,7 @@ def main():
     build_grass(mats, env, terrain, (road_obj, gutter), cam, rng)
     build_world(scene)
     build_haze(env)
+    build_fog_banks(road, env, cam_path)
     add_distance_fog()
     configure_render(scene)
 

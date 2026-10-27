@@ -15,13 +15,6 @@ the shot.
 
 ## Environment
 
-The forest and fog items below are steps towards the look of
-`~/Downloads/Austria-kleinwalsertal-hiking3.jpg` (not in the repository): hills under a dense fir
-forest, paler and greyer with distance, with low cloud caught on the slopes.
-
-- **Fog banks.** Low cloud drifting over the slopes: stretched volume ellipsoids within the
-  300 m EEVEE volume range, their density from 4D noise × a height falloff × a soft edge, with
-  the noise W animated for the drift.
 - **Branch motion.** Grass clumps and firs lean as rigid wholes with the gusts. Bending
   trunks and fluttering branches need per-vertex deformation; doing that as shader displacement
   made the Radeon 680M time out and reset during animation renders.
@@ -41,4 +34,5 @@ forest, paler and greyer with distance, with low cloud caught on the slopes.
   GTX 1060 6GB) a 1280×720 frame takes 65 s with 27 min of CPU time. Time a GPU-only and a
   CPU-only frame on each machine to find the fastest device set.
 - **Final render in Cycles.** The 480-frame clip takes about 8.7 hours on the workstation and
-  about 18 hours on the laptop, measured before the forest and the grass culling.
+  about 18 hours on the laptop, measured before the forest and the grass culling. The fog
+  banks nearly doubled a 50 %, 16-sample preview frame on the laptop GPU (10 s to 18 s).
