@@ -2799,6 +2799,37 @@ def add_fur(obj, mats, count, length, direction, density_group=None, strands="st
         psys.vertex_group_density = density_group
 
 
+def comb_fur(obj, groom, lift=(0.35, 0.05)):
+    """Lay the guide strands of obj's last particle system along the skin. groom(root, normal)
+    gives the direction to comb a strand in and its length, both in object space; the strand
+    leaves the skin at lift[0] rad and bends over to lift[1] rad at the tip. The particle edit
+    toggle copies the grown strands into the original data, where the keys can be set."""
+    bpy.context.view_layer.objects.active = obj
+    obj.particle_systems.active_index = len(obj.particle_systems) - 1
+    bpy.ops.object.mode_set(mode='PARTICLE_EDIT')
+    bpy.ops.object.mode_set(mode='OBJECT')
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    ev = obj.evaluated_get(depsgraph)
+    mod = next(m for m in ev.modifiers if m.type == 'PARTICLE_SYSTEM' and m.particle_system.name == obj.particle_systems[-1].name)
+    bvh = BVHTree.FromObject(obj, depsgraph)
+    rng = random.Random(SEED)
+    for p, ep in zip(obj.particle_systems[-1].particles, ev.particle_systems[-1].particles):
+        root = Vector(ep.hair_keys[0].co_object(ev, mod, ep))
+        normal = bvh.find_nearest(root)[1]
+        direction, length = groom(root, normal)
+        tangent = direction - normal * direction.dot(normal)
+        if tangent.length < 1e-6:
+            tangent = normal.orthogonal()
+        tangent.normalize()
+        length *= rng.uniform(0.8, 1.2)
+        steps = len(p.hair_keys) - 1
+        co = root.copy()
+        for k, key in enumerate(p.hair_keys):
+            key.co_object_set(ev, mod, ep, co)
+            angle = lerp(lift[0], lift[1], k / steps)
+            co = co + (tangent * math.cos(angle) + normal * math.sin(angle)) * length / steps
+
+
 def segment(b, p0, p1, width, depth, overhang, mat):
     """Ellipsoid spanning p0..p1 (plus overhang at each end): a muscle mass along a bone."""
     p0, p1 = Vector(p0), Vector(p1)
@@ -3311,6 +3342,23 @@ def build_head(mats, coll, cat_rig):
         density = min(density, smoothstep(0.0015, 0.0035, mouth_points.find(v.co)[2]))
         group.add([v.index], density, 'REPLACE')
     add_fur(head, mats, 3500, 0.006, (-1.2, 0.0, 0.0), density_group=group.name)
+    settings = head.particle_systems[-1].settings
+    settings.roughness_1 = 0.0004
+    settings.roughness_endpoint = 0.0003
+    settings.radius_scale = 0.0004
+    settings.rendered_child_count = 40
+
+    def groom(root, normal):
+        """Short sleek fur, after the photo, flowing out from the nose, back over the forehead
+        and out over the cheeks; longer towards the neck and a little longer on the cheeks below
+        the eyes, combed down and back there."""
+        p = root + NECK
+        ruff = smoothstep(0.04, 0.058, abs(p.y)) * smoothstep(0.605, 0.585, p.z) * smoothstep(0.165, 0.13, p.x)
+        direction = (p - NOSE_CENTRE).normalized() + Vector((0.0, 0.0, -0.6)) * ruff
+        length = lerp(0.0025, 0.005, smoothstep(0.14, 0.07, p.x))
+        return direction, lerp(length, 0.0055, ruff)
+
+    comb_fur(head, groom, lift=(0.25, 0.0))
 
     # Nose leather: a rounded triangle, wide at the top.
     f = MeshBuilder(NECK)

@@ -8,9 +8,6 @@ the shot.
 The face reads as a cartoon. The items below take it apart one feature at a time; judge each
 on a close-up still in Cycles as well as EEVEE, since the fur strands shade differently in the two.
 
-- **Face fur.** The 6 mm head strands stand straight out like a brush. Shorten them to 3–4 mm,
-  lay them flat along the skin, and comb them in the flow of a real coat: from the nose back
-  over the forehead and out over the cheeks, with a longer ruff on the cheeks.
 - **Ears.** Replace the straight cones with a thin curved shell: a rolled rim, an open cup
   inside and the small fold at the base of the outer edge. Swap the brush of pale bristles in
   the cup for sparse, fine hair.
