@@ -42,6 +42,10 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
   and smoother valley floors.
 - **Vegetation variety.** Bushes, wildflowers and fallen needles on the verges; a second tree
   species for variety next to the firs.
+- **Sun glare.** Between frames 43-85 there is a strong glare from the sun that overwhelms the
+  image. We should either put an object such as a fir tree on the small hill to the right of
+  the road that the sunlight can filter through, or move the camera closer in to the cat so
+  the cat's silhouette can block part of the sunlight.
 
 ## Rendering
 
