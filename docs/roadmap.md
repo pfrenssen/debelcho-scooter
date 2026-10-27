@@ -12,7 +12,8 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
   whisker pads; shorter and fewer above the eyes.
 - **Skull.** The head is overlapping ellipsoids. Add eye sockets, a step from the forehead to
   the nose, cheekbones, and a muzzle and chin that stand out from the face.
-- **Sun on the climb.** From frame 85 to 165 the cat climbs a stretch steeper than the 4° sun,
+- **Sun on the climb** (low priority: the cat is only briefly in shade, right after the sun
+  sets behind the hill). From frame 85 to 165 the cat climbs a stretch steeper than the 4° sun,
   so the road ahead shades it. Easing that grade, or a light linked to the cat for those frames,
   would keep it in the sun.
 - **Body fur grooming.** Vary the length by region (shorter on the paws, longer on the chest
