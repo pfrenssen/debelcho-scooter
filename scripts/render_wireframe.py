@@ -3,7 +3,7 @@
 Usage:
     blender -b build/cat_scooter.blend --python scripts/render_wireframe.py -a
 
-Writes build/render/wireframe_0001-NNNN.mp4. Fur is hidden. Workbench does not render the
+Writes build/render/wireframe_0001-NNNN.mkv, which plays while it is still being written. Fur is hidden. Workbench does not render the
 WIREFRAME shading type, so the scooter and the cat get a Wireframe modifier and the
 environment is shaded solid.
 """
@@ -18,6 +18,7 @@ shading.light = 'FLAT'
 shading.color_type = 'OBJECT'
 scene.render.use_motion_blur = False
 scene.render.filepath = "//render/wireframe_"
+scene.render.ffmpeg.format = 'MKV'  # unlike MP4, it has no index written only at the end
 scene.world.color = (0.02, 0.02, 0.025)
 
 for obj in scene.objects:
