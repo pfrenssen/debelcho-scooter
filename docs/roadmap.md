@@ -8,10 +8,6 @@ the shot.
 The face reads as a cartoon. The items below take it apart one feature at a time; judge each
 on a close-up still in Cycles as well as EEVEE, since the fur strands shade differently in the two.
 
-- **Eyes.** Drop the emission that makes them glow at dusk. Give the iris radial fibres and a
-  gradient from amber round the pupil to green at the rim, and widen the pupil to the oval it
-  is in the evening light instead of a 1.6 mm slit. Frame each eye with dark eyelid rims that
-  set its almond shape, and seat it in a socket so the lids wrap round it.
 - **Face fur.** The 6 mm head strands stand straight out like a brush. Shorten them to 3–4 mm,
   lay them flat along the skin, and comb them in the flow of a real coat: from the nose back
   over the forehead and out over the cheeks, with a longer ruff on the cheeks.

@@ -129,7 +129,7 @@ CAT_PIVOT = Vector((-0.04, 0.0, 0.117))  # in the cat's modelling frame; see CAT
 NECK = Vector((0.09, 0.0, 0.52))
 EYE_CENTRE = Vector((0.166, 0.031, 0.613))  # left eye; the right one mirrors it
 EYE_RADII = (0.013, 0.0155, 0.012)  # depth, width, height in the eye's own frame
-EYE_TURN = (0.2, 0.35)  # left eye: tilt about X (outer corner up) and turn about Z (outwards)
+EYE_TURN = 0.35  # the left eye turns this far outwards about Z; upright, so the slit pupil is
 CORNEA_BULGE = 1.05  # the cornea's depth as a multiple of the eye's
 IRIS_DEPTH = 0.7  # the flat iris sits this fraction of the eye's depth in front of its centre
 NOSE_CENTRE = Vector((0.192, 0.0, 0.586))
@@ -1092,11 +1092,12 @@ def grass_blade_material():
 
 
 def eye_material():
-    """Round iris, amber round the pupil and green towards a dark rim, of radial fibres, with
-    the tall oval pupil of a cat's eye in the evening light. Drawn in the eye object's own frame
-    (+X out of the eye, +Z up), seen through the cornea. The iris has no gloss of its own: the
-    cornea carries the reflections, and the pupil stays dark under them."""
-    mat = make_material("CatEye", (0.18, 0.2, 0.03), 0.6, inputs={"Specular IOR Level": 0.0})
+    """Round iris after the photo of the real cat: pale grey-green, mottled and finely fibred,
+    with a faint gold ring round the pupil and a dark rim, and a thin slit pupil, as in the low
+    evening sun. Drawn in the eye object's own frame (+X out of the eye, +Z up), seen through
+    the cornea. The iris has no gloss of its own: the cornea carries the reflections, and the
+    pupil stays dark under them."""
+    mat = make_material("CatEye", (0.22, 0.27, 0.16), 0.6, inputs={"Specular IOR Level": 0.0})
     nt = mat.node_tree
     bsdf = principled_node(mat)
     coord = nt.nodes.new('ShaderNodeTexCoord')
@@ -1131,17 +1132,22 @@ def eye_material():
         return tex.outputs['Fac']
 
     fibres, patches = noise(30.0, 3.0), noise(5.0, 1.0)
-    # The amber collarette round the pupil has a ragged edge.
+    mottle = nt.nodes.new('ShaderNodeTexNoise')
+    mottle.inputs['Scale'].default_value = 250.0
+    mottle.inputs['Detail'].default_value = 2.0
+    nt.links.new(coord.outputs['Object'], mottle.inputs['Vector'])
+    # The gold ring round the pupil has a ragged edge.
     ragged = math_node(nt, 'ADD', r, math_node(nt, 'MULTIPLY', math_node(nt, 'SUBTRACT', patches, 0.5), 0.6))
-    iris = mix_colour(nt, smooth_range(nt, ragged, 0.38, 0.62), (0.32, 0.16, 0.02), (0.18, 0.2, 0.03))
-    iris = mix_colour(nt, smooth_range(nt, r, 0.6, 0.86), iris, (0.06, 0.12, 0.03))
-    iris = mix_colour(nt, smooth_range(nt, r, 0.88, 0.98), iris, (0.015, 0.025, 0.01))
-    shade = smooth_range(nt, fibres, 0.4, 0.6)
-    iris = mix_colour(nt, 1.0, iris, mix_colour(nt, shade, (0.55, 0.55, 0.55), (1.35, 1.35, 1.35)), 'MULTIPLY')
+    iris = mix_colour(nt, smooth_range(nt, ragged, 0.2, 0.45), (0.3, 0.27, 0.11), (0.22, 0.27, 0.16))
+    iris = mix_colour(nt, smooth_range(nt, r, 0.6, 0.86), iris, (0.14, 0.2, 0.11))
+    iris = mix_colour(nt, smooth_range(nt, r, 0.88, 0.98), iris, (0.02, 0.03, 0.02))
+    shade = math_node(nt, 'MULTIPLY', smooth_range(nt, fibres, 0.4, 0.6), smooth_range(nt, mottle.outputs['Fac'], 0.42, 0.58))
+    iris = mix_colour(nt, 1.0, iris, mix_colour(nt, shade, (0.7, 0.7, 0.7), (1.2, 1.2, 1.2)), 'MULTIPLY')
 
-    # The pupil: an upright oval, 0.3 of the iris's width across and twice that high.
-    oval = length(math_node(nt, 'DIVIDE', y, 0.3 * iris_radius), math_node(nt, 'DIVIDE', z, 0.62 * iris_radius))
-    pupil = smooth_range(nt, oval, 1.04, 0.96)
+    # The slit pupil is 2 mm wide at the middle and closes to points at the top and bottom.
+    taper = math_node(nt, 'SUBTRACT', 1.0, math_node(nt, 'POWER', math_node(nt, 'DIVIDE', z, 0.95 * iris_radius), 2.0))
+    half = math_node(nt, 'MAXIMUM', math_node(nt, 'MULTIPLY', taper, 0.001), 0.0)
+    pupil = smooth_range(nt, math_node(nt, 'SUBTRACT', math_node(nt, 'ABSOLUTE', y, 0.0), half), 0.0001, -0.0001)
     nt.links.new(mix_colour(nt, pupil, iris, (0.0, 0.0, 0.0)), bsdf.inputs['Base Color'])
     return mat
 
@@ -3144,7 +3150,7 @@ def whisker(b, start, direction, length, droop, radius):
 def eye_matrix(s):
     """The eye's own frame in the head rig (s = 1 for the left eye, -1 for the right): +X out of
     the eye, +Z up."""
-    return T(*(EYE_CENTRE * Vector((1, s, 1)) - NECK)) @ R(s * EYE_TURN[1], 'Z') @ R(s * EYE_TURN[0], 'X')
+    return T(*(EYE_CENTRE * Vector((1, s, 1)) - NECK)) @ R(s * EYE_TURN, 'Z')
 
 
 class EyeLids:
@@ -3160,8 +3166,8 @@ class EyeLids:
 
     def __init__(self, n=96):
         t = np.linspace(-1.0, 1.0, n // 2 + 1)
-        u = np.interp(t, (-1, 1), (-0.92, 0.86))
-        middle = np.interp(t, (-1, 1), (-0.18, 0.04))
+        u = np.interp(t, (-1, 1), (-0.9, 0.84))
+        middle = np.interp(t, (-1, 1), (-0.35, 0.22))  # the outer corner up
         lower = middle - 0.72 * (1 - t ** 2) ** 0.85
         upper = middle + 0.8 * (1 - t ** 2) ** 0.75
         self.outline = np.concatenate((np.stack((u, lower), 1), np.stack((u, upper), 1)[-2:0:-1]))
@@ -3379,8 +3385,8 @@ def build_head(mats, coll, cat_rig):
         add_fur(ear, mats, 120, 0.008, (0.0, 0.0, 0.5), density_group=tufts.name, strands="ear_tufts")
         ears.append(pivot)
 
-    # Eyes: ellipsoids seated in the sockets under the brows, turned a little outwards and with
-    # the outer corner up. The object frame is the eye's own, which the iris and the pupil of
+    # Eyes: ellipsoids seated in the sockets under the brows, turned a little outwards. The
+    # lids set the outer corner up. The object frame is the eye's own, which the iris and the pupil of
     # the eye material and the almond opening of the lids are drawn in.
     eyes = []
     for s in (-1, 1):
@@ -3391,7 +3397,7 @@ def build_head(mats, coll, cat_rig):
             v.co.x = min(v.co.x, IRIS_DEPTH * EYE_RADII[0])
         side = "L" if s > 0 else "R"
         eye = e.to_object("Eye" + side, [mats["eye"]], coll, head_rig, c - NECK)
-        eye.rotation_euler = (s * EYE_TURN[0], 0.0, s * EYE_TURN[1])
+        eye.rotation_euler = (0.0, 0.0, s * EYE_TURN)
         # The lids and the cornea are children of the eye, so they close with it in the blinks.
         lids.skin(s, head_bvh, frames[s]).to_object("Lids" + side, [mats["lid_rim"], mats["fur"]], coll, eye)
         # The cornea bulges out in front of the iris.
