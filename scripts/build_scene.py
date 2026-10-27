@@ -180,6 +180,7 @@ CAMERA_KEYS = [
 # Handheld shake: noise on the camera's rotation, (strength in radians, period in frames) per
 # axis: tilt, pan, roll.
 SHAKE = [(0.010, 28.0), (0.012, 34.0), (0.006, 40.0)]
+BLOOM_MAXIMUM = 3.0  # highlights are clamped to this before the bloom: the sun disc flooded the frame
 VIGNETTE = 0.15  # darkening at distance 1 from the centre (half the frame width), growing with r²
 GRAIN = 0.08  # film grain amplitude as a fraction of the linear pixel value, before the AgX view
 # Primary grade, ASC CDL on the linear image before the AgX view: slightly deeper blacks, cool
@@ -3790,6 +3791,8 @@ def add_compositing(scene):
     glare.inputs['Type'].default_value = 'Bloom'
     glare.inputs['Threshold'].default_value = 1.0
     glare.inputs['Strength'].default_value = 0.5
+    glare.inputs['Clamp'].default_value = True
+    glare.inputs['Maximum'].default_value = BLOOM_MAXIMUM
     tree.links.new(layers.outputs['Image'], glare.inputs['Image'])
 
     cdl = tree.nodes.new('CompositorNodeColorBalance')
