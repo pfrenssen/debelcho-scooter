@@ -774,14 +774,14 @@ def build_materials():
         "cornea": cornea_material(),
         "lid_rim": make_material("LidRim", (0.003, 0.003, 0.003), 0.55),
         "nose": make_material("CatNose", (0.03, 0.028, 0.03), 0.5),
-        "inner_ear": make_material("InnerEar", (0.10, 0.05, 0.05), 0.55),
+        "inner_ear": make_material("InnerEar", (0.02, 0.011, 0.009), 0.55),  # dark reddish-brown, after the photo
         "whisker": make_material("Whisker", (0.8, 0.8, 0.77), 0.35),
         "kerchief": kerchief_material(),
         "spring": make_material("Spring", (0.12, 0.12, 0.13), 0.3, metallic=1.0),
         "strands": strand_material(),
         "ear_tufts": make_material("EarTufts", (0.12, 0.115, 0.11), 0.4),  # pale hairs inside the ears
     }
-    cycles_hair(m["ear_tufts"], 0.55, 0.3)
+    cycles_hair(m["ear_tufts"], 0.2, 0.3)
     return m
 
 
@@ -3178,6 +3178,69 @@ def whisker(b, start, direction, length, droop, radius):
         b.cylinder(Matrix.Translation((p0 + p1) / 2) @ align_z(d), r0, d.length, 0, segments=5, radius2=r1)
 
 
+def ear_shell(s):
+    """A thin curved ear in its own frame (base at the origin, +Z up the ear, the cup opening
+    along +X, s = 1 for the left ear), after the photo: a cup, deep at the base and shallow at
+    the tip, thickened behind the base; a rolled rim; a convex inner edge and a straighter outer
+    edge with the small fold low down. Material 1 is the skin in the cup. Returns the builder
+    and, for each vertex, (t, u, in the cup): t the height in ear lengths, u from -1 at the
+    inner edge to 1 at the outer edge."""
+    height, half_width, shell, rim = 0.074, 0.035, 0.0012, 0.001
+    b = MeshBuilder()
+    info = []
+    front_us = [-1.0 + 2.0 * (k + 1) / 16 for k in range(15)]
+    arc = [math.pi * k / 6 for k in range(7)]
+
+    def ring(t):
+        tc = max(t, 0.0)
+        fold = smoothstep(0.08, 0.15, tc) * smoothstep(0.26, 0.19, tc)
+        tip = 0.006 * math.sqrt(1.0 - tc) * tc ** 4  # rounds the tip
+        widths = (half_width * (1.0 - tc) ** 0.7 + tip, half_width * (1.0 - tc) ** 0.95 * (1.0 - 0.1 * fold) + tip)
+        depth = 0.016 * (1.0 - tc) ** 1.1
+        base = 0.009 * (1.0 - smoothstep(0.0, 0.45, t))
+        th = min(shell, 0.4 * widths[0])
+
+        def front(u):
+            return 0.012 - depth * (1.0 - u * u), u * widths[u > 0]
+
+        def back(u):
+            return 0.012 - (depth + base) * (1.0 - u * u) - th, u * widths[u > 0]
+
+        def bead(u, phis):
+            r = min(rim + (0.0015 * fold if u > 0 else 0.0), 0.5 * widths[u > 0])
+            cx = 0.012 - th / 2
+            return [((cx + r * math.cos(phi), u * (widths[u > 0] + r * math.sin(phi))), u) for phi in phis]
+
+        points = [(front(u), u, True) for u in front_us]
+        points += [(p, u, False) for p, u in bead(1.0, arc)]
+        points += [(back(u), u, False) for u in reversed(front_us)]
+        points += [(p, u, False) for p, u in bead(-1.0, reversed(arc))]
+        z = t * height
+        row = []
+        for (x, y), u, cup in points:
+            row.append(b.bm.verts.new((x, s * y, z)))
+            info.append((t, u, cup))
+        return row, [cup for _, _, cup in points]
+
+    ts = [-EAR_ROOT / height] + [0.985 * k / 28 for k in range(29)]
+    rows = [ring(t) for t in ts]
+    n = len(rows[0][0])
+    for (r0, cup), (r1, _) in zip(rows, rows[1:]):
+        for i in range(n):
+            j = (i + 1) % n
+            face = b.bm.faces.new((r0[i], r0[j], r1[j], r1[i]))
+            face.material_index = 1 if cup[i] and cup[j] else 0
+            face.smooth = True
+    top = rows[-1][0]
+    tip = b.bm.verts.new((sum(v.co.x for v in top) / n, sum(v.co.y for v in top) / n, height))
+    info.append((1.0, 0.0, False))
+    for i in range(n):
+        b.bm.faces.new((top[i], top[(i + 1) % n], tip)).smooth = True
+    b.bm.faces.new(rows[0][0])
+    bmesh.ops.recalc_face_normals(b.bm, faces=b.bm.faces[:])
+    return b, info
+
+
 def eye_matrix(s):
     """The eye's own frame in the head rig (s = 1 for the left eye, -1 for the right): +X out of
     the eye, +Z up."""
@@ -3391,46 +3454,52 @@ def build_head(mats, coll, cat_rig):
             whisker(w, start, Vector((0.35, s * spread, rise)), length, Vector((-0.5, s * 0.2, -0.25)), 0.0003)
         w.to_object("BrowWhiskersL" if s > 0 else "BrowWhiskersR", [mats["whisker"]], coll, head_rig)
 
-    # Large upright ears, set high and wide at the base. The cone runs on EAR_ROOT into the
-    # skull, so its rim stays inside the head where the skull curves away under the base. The
-    # ear does not turn as a whole: a hook to a pivot at the base, which carries the twitches
-    # and the flutter, bends the ear above the root, and the root stays fixed in the head.
+    # Large upright ears, set high and wide at the base: thin shells (ear_shell) that run on
+    # EAR_ROOT into the skull, so the base stays inside the head where the skull curves away
+    # under it. The ear does not turn as a whole: a hook to a pivot at the base, which carries
+    # the twitches and the flutter, bends the ear above the root, and the root stays fixed in
+    # the head.
     ears = []
     for s in (-1, 1):
         base = Vector((0.098, s * 0.05, 0.645))
-        e = MeshBuilder(base)
-        e.cone(Matrix.Translation(base - Vector((0, 0, EAR_ROOT))) @ S(0.5, 1, 1), 0.038 * (1 + EAR_ROOT / 0.072),
-               0.072 + EAR_ROOT, 0, segments=24)
-        # The inner ear lies along the sloping front face of the ear, a little proud of it.
-        e.cone(Matrix.Translation(base + Vector((0.0155, 0, 0.006))) @ R(-0.26, 'Y') @ S(0.15, 1, 1), 0.027, 0.056, 1)
-        for z in (-0.006, 0.0, 0.005, 0.01, 0.017, 0.025, 0.034, 0.044, 0.056):  # rings for the bend
-            bmesh.ops.bisect_plane(e.bm, geom=e.bm.verts[:] + e.bm.edges[:] + e.bm.faces[:], plane_co=(0, 0, z),
-                                   plane_no=(0, 0, 1))
+        e, info = ear_shell(s)
         name = "EarL" if s > 0 else "EarR"
         ear = e.to_object(name, [mats["fur"], mats["inner_ear"]], coll, head_rig, base - NECK)
         ear.rotation_euler = (-s * 0.3, -0.12, s * 0.2)
         pivot = make_empty(name.replace("Ear", "EarPivot"), coll, head_rig, base - NECK, size=0.02)
         pivot.rotation_euler = ear.rotation_euler  # same frame as the ear, so the hook binds at identity
 
-        inner = {v for poly in ear.data.polygons if poly.material_index == 1 for v in poly.vertices}
         bend = ear.vertex_groups.new(name="Bend")
         outer = ear.vertex_groups.new(name="OuterFur")
-        tufts = ear.vertex_groups.new(name="Tufts")
-        for v in ear.data.vertices:
+        hairs = ear.vertex_groups.new(name="CupHair")
+        for v, (t, u, cup) in zip(ear.data.vertices, info):
             bend.add([v.index], smoothstep(0.003, 0.03, v.co.z), 'REPLACE')
-            if v.index in inner:
-                # Tufts of pale hair from the front of the inner ear, low down, combed a little upwards.
-                if v.normal.x > 0.2:
-                    tufts.add([v.index], 1.0 - smoothstep(0.01, 0.03, v.co.z), 'REPLACE')
+            if cup:
+                # Sparse fine hairs over the cup above the head, fewer towards the tip, more along
+                # the edges.
+                hairs.add([v.index], smoothstep(0.08, 0.18, t) * (1.0 - smoothstep(0.5, 0.85, t))
+                          * lerp(0.4, 1.0, smoothstep(0.3, 0.9, abs(u))), 'REPLACE')
             else:
-                # Fur on the outside, as long as the head's at the root and shorter up to the tip.
-                outer.add([v.index], lerp(1.0, 0.4, smoothstep(0.0, 0.06, v.co.z)), 'REPLACE')
+                # Fur on the back and the rim, thinning out towards the tip.
+                outer.add([v.index], lerp(1.0, 0.4, smoothstep(0.0, 0.8, t)), 'REPLACE')
         hook = ear.modifiers.new("Bend", 'HOOK')
         hook.object = pivot
         hook.vertex_group = bend.name
-        add_fur(ear, mats, 700, 0.006, (0.0, 0.0, 0.8), density_group=outer.name)
-        ear.particle_systems[-1].vertex_group_length = outer.name
-        add_fur(ear, mats, 120, 0.008, (0.0, 0.0, 0.5), density_group=tufts.name, strands="ear_tufts")
+        add_fur(ear, mats, 700, 0.004, (0.0, 0.0, 0.8), density_group=outer.name)
+        settings = ear.particle_systems[-1].settings
+        settings.roughness_1 = 0.0004
+        settings.roughness_endpoint = 0.0003
+        settings.radius_scale = 0.0004
+        settings.rendered_child_count = 40
+        # Short sleek fur combed up the back of the ear, as long as the head's at the root.
+        comb_fur(ear, lambda root, normal: (Vector((0.0, 0.0, 1.0)), lerp(0.0045, 0.002, smoothstep(0.0, 0.06, root.z))),
+                 lift=(0.25, 0.0))
+        add_fur(ear, mats, 90, 0.008, (0.0, 0.0, 0.5), density_group=hairs.name, strands="ear_tufts")
+        settings = ear.particle_systems[-1].settings
+        settings.child_type = 'NONE'
+        settings.radius_scale = 0.0002
+        # Fine hairs rising up the cup and a little out of it.
+        comb_fur(ear, lambda root, normal: (Vector((0.0, 0.0, 1.0)), 0.009), lift=(0.5, 0.15))
         ears.append(pivot)
 
     # Eyes: ellipsoids seated in the sockets under the brows, turned a little outwards. The

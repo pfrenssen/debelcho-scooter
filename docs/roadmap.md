@@ -8,9 +8,6 @@ the shot.
 The face reads as a cartoon. The items below take it apart one feature at a time; judge each
 on a close-up still in Cycles as well as EEVEE, since the fur strands shade differently in the two.
 
-- **Ears.** Replace the straight cones with a thin curved shell: a rolled rim, an open cup
-  inside and the small fold at the base of the outer edge. Swap the brush of pale bristles in
-  the cup for sparse, fine hair.
 - **Whiskers.** Thinner, tapering to a fine tip and a little translucent, in more rows on the
   whisker pads; shorter and fewer above the eyes.
 - **Skull.** The head is overlapping ellipsoids. Add eye sockets, a step from the forehead to
