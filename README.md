@@ -17,7 +17,16 @@ blender -b --factory-startup --python scripts/build_scene.py   # writes build/ca
 blender -b build/cat_scooter.blend -a                           # EEVEE, MP4 in build/render/
 ```
 
-For Cycles, render a PNG sequence and encode it:
+The scene renders at 1280×720. For 1080p or 2160p, set the resolution with
+`scripts/render_resolution.py`:
+
+```bash
+blender -b build/cat_scooter.blend --python scripts/render_resolution.py -a -- 1920 1080
+blender -b build/cat_scooter.blend --python scripts/render_resolution.py -a -- 3840 2160
+```
+
+For Cycles, render a PNG sequence and encode it (add `--python scripts/render_resolution.py`
+and `-- 1920 1080` at the end for 1080p):
 
 ```bash
 blender -b build/cat_scooter.blend --python scripts/render_cycles.py -o //render/cycles_#### -F PNG -a

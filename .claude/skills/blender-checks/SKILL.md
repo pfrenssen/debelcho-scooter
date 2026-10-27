@@ -26,7 +26,9 @@ Gotchas found the hard way in this project, on Blender 5.2.3. Each one cost a wa
 ## Lights and fur
 
 - Light linking (`light_linking.receiver_collection`) limits surfaces only: the light still
-  scatters in the haze volume. Set `light.volume_factor = 0` on a linked light.
+  scatters in the haze volume. Set `light.volume_factor = 0` on a linked light. Other objects
+  still shadow it: for a light on the cat alone, also set `light_linking.blocker_collection` to
+  the cat.
 - The fur is STRIP hair with a Principled BSDF: strip normals face the camera, so back light
   shows as random glints, not a rim. The Principled Hair BSDF renders black in EEVEE; it works
   in Cycles only.
@@ -37,3 +39,6 @@ Gotchas found the hard way in this project, on Blender 5.2.3. Each one cost a wa
   geometry on a static close camera without DOF or motion blur, then confirm in a shot frame.
 - Measure white balance on a neutral surface (an asphalt patch), not on whole-frame averages:
   grass and terrain albedo skew those.
+- After adding tall geometry, compare a frame looking into the sun (frame 13) before and after:
+  at 4° its shadows in the haze dim the sunset glow. New kinds of object must also keep below
+  `road.sun_cap`, as the terrain, firs and stones do, or they shade the cat.
