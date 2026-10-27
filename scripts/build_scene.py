@@ -1090,40 +1090,57 @@ def grass_blade_material():
 
 
 def eye_material():
-    """Pale green-gold iris, golden round the pupil and with a dark rim, and a vertical slit
-    pupil, drawn in the eye object's own frame (+X out of the eye, +Z up), seen through the
-    cornea. A little emission keeps the eyes catching the light in the dusk."""
-    mat = make_material("CatEye", (0.45, 0.52, 0.25), 0.4)
+    """Round iris, amber round the pupil and green towards a dark rim, of radial fibres, with
+    the tall oval pupil of a cat's eye in the evening light. Drawn in the eye object's own frame
+    (+X out of the eye, +Z up), seen through the cornea. The iris has no gloss of its own: the
+    cornea carries the reflections, and the pupil stays dark under them."""
+    mat = make_material("CatEye", (0.18, 0.2, 0.03), 0.6, inputs={"Specular IOR Level": 0.0})
     nt = mat.node_tree
     bsdf = principled_node(mat)
     coord = nt.nodes.new('ShaderNodeTexCoord')
     local = nt.nodes.new('ShaderNodeSeparateXYZ')
     nt.links.new(coord.outputs['Object'], local.inputs[0])
     y, z = local.outputs['Y'], local.outputs['Z']
-    _, width, height = EYE_RADII
+    iris_radius = 0.92 * EYE_RADII[1]
 
-    scaled = nt.nodes.new('ShaderNodeCombineXYZ')
-    nt.links.new(math_node(nt, 'DIVIDE', y, width), scaled.inputs['Y'])
-    nt.links.new(math_node(nt, 'DIVIDE', z, height), scaled.inputs['Z'])
-    radius = nt.nodes.new('ShaderNodeVectorMath')
-    radius.operation = 'LENGTH'
-    nt.links.new(scaled.outputs['Vector'], radius.inputs[0])
-    r = radius.outputs['Value']
-    fibres = nt.nodes.new('ShaderNodeTexNoise')
-    fibres.inputs['Scale'].default_value = 900.0
-    fibres.inputs['Detail'].default_value = 3.0
-    nt.links.new(coord.outputs['Object'], fibres.inputs['Vector'])
-    iris = mix_colour(nt, smooth_range(nt, r, 0.25, 0.7), (0.62, 0.55, 0.18), (0.42, 0.52, 0.25))
-    iris = mix_colour(nt, smooth_range(nt, r, 0.8, 0.98), iris, (0.1, 0.12, 0.05))
-    iris = mix_colour(nt, 1.0, iris, mix_colour(nt, fibres.outputs['Fac'], (0.75, 0.75, 0.75), (1.2, 1.2, 1.2)), 'MULTIPLY')
+    def length(y_value, z_value):
+        v = nt.nodes.new('ShaderNodeCombineXYZ')
+        nt.links.new(y_value, v.inputs['Y'])
+        nt.links.new(z_value, v.inputs['Z'])
+        node = nt.nodes.new('ShaderNodeVectorMath')
+        node.operation = 'LENGTH'
+        nt.links.new(v.outputs['Vector'], node.inputs[0])
+        return node.outputs['Value']
 
-    # The slit is 1.6 mm wide at the middle and closes towards the top and bottom.
-    taper = math_node(nt, 'SUBTRACT', 1.0, math_node(nt, 'POWER', math_node(nt, 'DIVIDE', z, height * 1.05), 2.0))
-    slit = math_node(nt, 'LESS_THAN', math_node(nt, 'ABSOLUTE', y, 0.0), math_node(nt, 'MULTIPLY', taper, 0.0008))
-    colour = mix_colour(nt, slit, iris, (0.0, 0.0, 0.0))
-    nt.links.new(colour, bsdf.inputs['Base Color'])
-    nt.links.new(colour, bsdf.inputs['Emission Color'])
-    bsdf.inputs['Emission Strength'].default_value = 0.25
+    r = math_node(nt, 'DIVIDE', length(y, z), iris_radius)
+    # Noise on the unit circle of the direction from the pupil, stretched along the radius:
+    # streaks that run out from the pupil, with no seam round the circle.
+    streaks = nt.nodes.new('ShaderNodeCombineXYZ')
+    across = math_node(nt, 'MAXIMUM', math_node(nt, 'MULTIPLY', r, iris_radius), 1e-6)
+    nt.links.new(math_node(nt, 'DIVIDE', y, across), streaks.inputs['X'])
+    nt.links.new(math_node(nt, 'DIVIDE', z, across), streaks.inputs['Y'])
+    nt.links.new(math_node(nt, 'MULTIPLY', r, 0.1), streaks.inputs['Z'])
+
+    def noise(scale, detail):
+        tex = nt.nodes.new('ShaderNodeTexNoise')
+        tex.inputs['Scale'].default_value = scale
+        tex.inputs['Detail'].default_value = detail
+        nt.links.new(streaks.outputs['Vector'], tex.inputs['Vector'])
+        return tex.outputs['Fac']
+
+    fibres, patches = noise(30.0, 3.0), noise(5.0, 1.0)
+    # The amber collarette round the pupil has a ragged edge.
+    ragged = math_node(nt, 'ADD', r, math_node(nt, 'MULTIPLY', math_node(nt, 'SUBTRACT', patches, 0.5), 0.6))
+    iris = mix_colour(nt, smooth_range(nt, ragged, 0.38, 0.62), (0.32, 0.16, 0.02), (0.18, 0.2, 0.03))
+    iris = mix_colour(nt, smooth_range(nt, r, 0.6, 0.86), iris, (0.06, 0.12, 0.03))
+    iris = mix_colour(nt, smooth_range(nt, r, 0.88, 0.98), iris, (0.015, 0.025, 0.01))
+    shade = smooth_range(nt, fibres, 0.4, 0.6)
+    iris = mix_colour(nt, 1.0, iris, mix_colour(nt, shade, (0.55, 0.55, 0.55), (1.35, 1.35, 1.35)), 'MULTIPLY')
+
+    # The pupil: an upright oval, 0.3 of the iris's width across and twice that high.
+    oval = length(math_node(nt, 'DIVIDE', y, 0.3 * iris_radius), math_node(nt, 'DIVIDE', z, 0.62 * iris_radius))
+    pupil = smooth_range(nt, oval, 1.04, 0.96)
+    nt.links.new(mix_colour(nt, pupil, iris, (0.0, 0.0, 0.0)), bsdf.inputs['Base Color'])
     return mat
 
 
