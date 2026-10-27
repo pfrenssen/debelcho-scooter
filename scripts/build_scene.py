@@ -2765,6 +2765,72 @@ def remesh(obj, voxel_size, smooth_iterations):
     mesh.shade_smooth()
 
 
+class Blob:
+    """Ellipsoids blended into one smooth shape, without the creases of a plain union: the
+    smooth minimum of their signed distance fields (the ellipsoid approximation of Inigo
+    Quilez), each part rounded into the shape before it over its blend width."""
+
+    def __init__(self, origin=(0.0, 0.0, 0.0)):
+        self.origin = Vector(origin)
+        self.parts = []
+
+    def ellipsoid(self, centre, radii, blend, rot=None):
+        self.parts.append((Vector(centre), Vector(radii), rot or Matrix(), blend))
+
+    def distance(self, p):
+        """Signed distance of the points p (n × 3, rig frame) from the surface, negative inside;
+        close to the true distance near the surface."""
+        d = None
+        for centre, radii, rot, blend in self.parts:
+            q = (p - np.array(centre)) @ np.array(rot.to_3x3())  # into the ellipsoid's frame
+            radii = np.array(radii)
+            k0 = np.linalg.norm(q / radii, axis=1)
+            k1 = np.linalg.norm(q / radii ** 2, axis=1)
+            e = k0 * (k0 - 1.0) / np.maximum(k1, 1e-9)
+            if d is None:
+                d = e
+            else:
+                h = np.clip(0.5 + 0.5 * (e - d) / blend, 0.0, 1.0)
+                d = e + (d - e) * h - blend * h * (1.0 - h)
+        return d
+
+    def project(self, obj, voxel_size):
+        """Remesh obj and move every vertex onto the surface along the gradient of the distance."""
+        remesh(obj, voxel_size, 0)
+        co = np.empty(len(obj.data.vertices) * 3)
+        obj.data.vertices.foreach_get("co", co)
+        p = co.reshape(-1, 3) + np.array(self.origin)
+        eps = voxel_size * 0.1
+        for _ in range(6):
+            d = self.distance(p)
+            grad = np.stack([(self.distance(p + step) - self.distance(p - step)) / (2 * eps)
+                             for step in np.eye(3) * eps], axis=1)
+            p -= grad * (d / np.maximum((grad ** 2).sum(axis=1), 1e-9))[:, None]
+        obj.data.vertices.foreach_set("co", (p - np.array(self.origin)).ravel())
+        obj.data.update()
+
+    def to_object(self, name, materials, collection, parent, voxel_size):
+        """Mesh of the plain union projected onto the blended surface; projected twice, as
+        vertices that cross where the blend fills a crease fold the first projection."""
+        b = MeshBuilder(self.origin)
+        for centre, radii, rot, _ in self.parts:
+            b.ellipsoid(centre, radii, 0, rot=rot, segments=32, rings=16)
+        obj = b.to_object(name, materials, collection, parent)
+        self.project(obj, voxel_size)
+        self.project(obj, voxel_size)
+        return obj
+
+
+def sculpt(obj, centre, radii, depth):
+    """Press the surface in by depth (out where negative) along its normals, fading smoothly to
+    nothing at the ellipsoid of radii round centre (in the object's frame)."""
+    for v in obj.data.vertices:
+        r = Vector(d / radius for d, radius in zip(v.co - centre, radii))
+        weight = smoothstep(1.0, 0.0, r.length)
+        v.co -= v.normal * depth * weight
+    obj.data.update()
+
+
 def add_fur(obj, mats, count, length, direction, density_group=None, strands="strands"):
     """Particle hair of the given length along the normal; direction, in units of that length,
     is added to comb the strands. Blender grows hair for 4 time units at the emission velocity
@@ -3346,19 +3412,31 @@ def build_head(mats, coll, cat_rig):
     head_rig = make_empty("HeadRig", coll, cat_rig, NECK - CAT_PIVOT, size=0.05)
     head_rig.scale = (1.12, 1.12, 1.12)
     parent_to_bone(head_rig, cat_rig, "neck")
-    # A wedge-shaped head, after a photo of the real cat: a skull with full cheeks
-    # narrowing to a short muzzle, a nose bridge, and brow ridges that hood the top of the eyes.
-    b = MeshBuilder(NECK)
-    b.ellipsoid((0.112, 0, 0.605), (0.07, 0.074, 0.062), 0, segments=32, rings=16)
-    b.ellipsoid((0.16, 0, 0.598), (0.03, 0.02, 0.028), 0)  # nose bridge
-    b.ellipsoid((0.163, 0, 0.577), (0.034, 0.032, 0.025), 0)  # muzzle
-    b.ellipsoid((0.164, 0, 0.562), (0.019, 0.017, 0.01), 0)  # chin, clear of the handlebar
+    # A wedge-shaped head, after a photo of the real cat: a cranium whose forehead slopes down
+    # to a shallow stop between the eyes, a narrow nose bridge running on to the nose, cheekbones
+    # from under the eyes back towards the ears, where the face is widest, and a jaw that
+    # narrows to a short muzzle of whisker pads over a small chin.
+    b = Blob(NECK)
+    b.ellipsoid((0.108, 0, 0.607), (0.066, 0.068, 0.06), 0.0)  # cranium
+    bridge = Vector((0.188, 0, 0.592)) - Vector((0.168, 0, 0.616))
+    b.ellipsoid((0.178, 0, 0.604), (bridge.length / 2 + 0.008, 0.014, 0.01), 0.012,
+                rot=R(-math.atan2(bridge.z, bridge.x), 'Y'))  # nose bridge
+    b.ellipsoid((0.165, 0, 0.614), (0.016, 0.022, 0.014), 0.008)  # between the eyes
+    b.ellipsoid((0.163, 0, 0.574), (0.026, 0.026, 0.02), 0.012)  # muzzle
+    b.ellipsoid((0.166, 0, 0.561), (0.015, 0.014, 0.01), 0.008)  # chin, clear of the handlebar
     for s in (-1, 1):
-        b.ellipsoid((0.125, s * 0.038, 0.585), (0.048, 0.04, 0.038), 0)  # cheek
-        b.ellipsoid((0.178, s * 0.014, 0.569), (0.018, 0.017, 0.015), 0)  # whisker pad
-        b.ellipsoid((0.166, s * 0.031, 0.627), (0.014, 0.018, 0.007), 0, rot=R(s * 0.2, 'X'))  # brow
-    head = b.to_object("CatHead", [mats["fur"]], coll, head_rig)
-    remesh(head, 0.003, 6)
+        b.ellipsoid((0.145, s * 0.046, 0.597), (0.035, 0.014, 0.013), 0.015, rot=R(-s * 0.45, 'Z') @ R(-0.15, 'Y'))  # cheekbone
+        b.ellipsoid((0.125, s * 0.03, 0.578), (0.045, 0.026, 0.028), 0.015, rot=R(-s * 0.35, 'Z'))  # jaw
+        b.ellipsoid((0.179, s * 0.014, 0.571), (0.017, 0.016, 0.014), 0.006)  # whisker pad
+        b.ellipsoid((0.158, s * 0.034, 0.628), (0.016, 0.018, 0.006), 0.015, rot=R(s * 0.5, 'Z') @ R(s * 0.25, 'X'))  # brow
+    head = b.to_object("CatHead", [mats["fur"]], coll, head_rig, 0.003)
+    # The stop: the step from the forehead down to the nose bridge between the eyes.
+    sculpt(head, Vector((0.172, 0, 0.623)) - NECK, (0.012, 0.014, 0.008), 0.003)
+    for s in (-1, 1):
+        # The eye sockets, sunk between the brow and the cheekbone, and the whisker break, the
+        # groove between the whisker pad and the cheek.
+        sculpt(head, EYE_CENTRE * Vector((1, s, 1)) - NECK, (0.02, 0.024, 0.017), 0.0015)
+        sculpt(head, Vector((0.166, s * 0.031, 0.574)) - NECK, (0.008, 0.007, 0.014), 0.0015)
 
     # Eye sockets: the head is pressed back behind the lids and the eyes, so the lids wrap
     # round the eyes and the brows no longer hood them.
@@ -3432,6 +3510,11 @@ def build_head(mats, coll, cat_rig):
         v.co.y *= 1.0 + 0.6 * below
     f.to_object("CatFace", [mats["nose"]], coll, head_rig)
 
+    def under_skin(p, centre, depth=0.001):
+        """The point depth under the skin in the direction of p from centre, inside the head."""
+        hit, normal, _, _ = bvh.ray_cast(centre - NECK, p - centre)
+        return hit + NECK - normal * depth
+
     # Long, fine whiskers fanning out of the whisker pads, tapering and drooping to the tips.
     whiskers = []
     for s in (-1, 1):
@@ -3441,7 +3524,7 @@ def build_head(mats, coll, cat_rig):
                                                   (0.188, 0.568, 0.02, 0.12), (0.181, 0.569, -0.04, 0.118),
                                                   (0.188, 0.562, -0.1, 0.11), (0.181, 0.563, -0.16, 0.1),
                                                   (0.186, 0.557, -0.22, 0.09))):
-            start = Vector((x, s * (0.022 + 0.6 * (0.19 - x)), z))
+            start = under_skin(Vector((x, s * (0.022 + 0.6 * (0.19 - x)), z)), Vector((0.165, s * 0.012, 0.568)))
             whisker(w, start, Vector((0.3, s, rise)), length, Vector((-0.25, 0, -0.18)), 0.0005)
         whiskers.append(w.to_object("WhiskersL" if s > 0 else "WhiskersR", [mats["whisker"]], coll, head_rig,
                                     root - NECK))
@@ -3451,7 +3534,7 @@ def build_head(mats, coll, cat_rig):
         w = MeshBuilder(NECK)
         for k, (spread, rise, length) in enumerate(((0.3, 1.0, 0.05), (0.5, 0.9, 0.045), (0.7, 0.8, 0.04),
                                                     (0.9, 0.6, 0.035))):
-            start = Vector((0.172, s * (0.02 + 0.004 * k), 0.629))
+            start = under_skin(Vector((0.172, s * (0.02 + 0.004 * k), 0.629)), Vector((0.12, 0, 0.61)))
             whisker(w, start, Vector((0.35, s * spread, rise)), length, Vector((-0.5, s * 0.2, -0.25)), 0.0003)
         w.to_object("BrowWhiskersL" if s > 0 else "BrowWhiskersR", [mats["whisker"]], coll, head_rig)
 
