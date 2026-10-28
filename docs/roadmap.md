@@ -19,9 +19,6 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
   children can also land in the bare zone. Find which system pokes through first (render one
   particle system at a time); then shorten or comb away the strands near the cloth, or cut
   them where they meet it.
-- **Small movements.** Apart from leaning forwards and backwards the cat is mostly motionless.
-  It should move its left elbow at some point, for example after hitting a speed bump, and
-  also make another small moment in another point, like hunching its shoulders a bit.
 
 ## Environment
 

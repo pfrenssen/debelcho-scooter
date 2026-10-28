@@ -194,6 +194,8 @@ GLANCE = (262, 292)  # frames: the cat turns its head to the camera on its left,
 GLANCE_HEAD = (0.8, 1.0)  # the head turns this fraction of the way, at most this far (radians)
 GAZE_SHIFT = 0.002  # metres the pupils move sideways at most: the eyes turn the rest of the way
 SLOW_BLINK = (274, 0.3)  # start frame and the lids' opening at the middle of a slow blink at the camera
+ELBOW_FLARE = (3, 0.6)  # the left elbow flares out after this defect of LINE_DEFECTS, by this pole angle (radians)
+HUNCH = (100, 150, 0.02)  # frames and metres: the cat hunches its shoulders in the shade of the climb
 
 
 def smoothstep(e0, e1, x):
@@ -3033,7 +3035,28 @@ def build_cat_armature(coll, scooter_body):
             ik = rig.pose.bones[f"{chain}.{side}"].constraints.new('IK')
             ik.target = target
             ik.chain_count = 2
+            if chain == "forearm":
+                elbow_pole(rig, side, ik, coll)
     return rig
+
+
+def elbow_pole(rig, side, ik, coll):
+    """Pole target for an arm's IK, on the spine, placed and angled so that the elbow stays where
+    it rests; animate() swings the elbow about the shoulder-wrist line by keying the pole angle."""
+    up, fore = rig.data.bones[f"upperarm.{side}"], rig.data.bones[f"forearm.{side}"]
+    shoulder, elbow, wrist = up.head_local, fore.head_local, fore.tail_local
+    axis = (wrist - shoulder).normalized()
+    bend = (elbow - shoulder - axis * (elbow - shoulder).dot(axis)).normalized()
+    pole = make_empty(f"ElbowPole.{side}", coll, size=0.02)
+    parent_to_bone(pole, rig, "spine")
+    pole.location = elbow + 0.1 * bend
+    # The pole angle runs clockwise about the upper arm, from its X axis to the pole direction
+    # normal to it.
+    base = up.tail_local - up.head_local
+    towards = (wrist - shoulder).cross(pole.location - shoulder).cross(base)
+    x = up.matrix_local.to_3x3().col[0]
+    ik.pole_target = pole
+    ik.pole_angle = -math.copysign(x.angle(towards), x.cross(towards).dot(base))
 
 
 def skin(obj, rig, smoothing=30):
@@ -3832,9 +3855,10 @@ def pose_suspension(scooter, susp, road, s, frame):
             spring.keyframe_insert(path, frame=frame)
 
 
-def pose_cat(rig, lean, drop, breath, frame):
+def pose_cat(rig, lean, drop, breath, shoulders, frame):
     """Lower the pelvis by drop and lean the spine forward by lean (radians) about its base, both
-    in the armature frame; widen the chest by the fraction breath. Keys the bones' channels."""
+    in the armature frame; widen the chest by the fraction breath, and raise the shoulders by
+    shoulders (metres, and a little forward). Keys the bones' channels."""
     pelvis, spine = rig.pose.bones["pelvis"], rig.pose.bones["spine"]
     rest = pelvis.bone.matrix_local
     pelvis.matrix_basis = rest.inverted() @ T(0, 0, drop) @ rest
@@ -3845,6 +3869,13 @@ def pose_cat(rig, lean, drop, breath, frame):
     for bone in (pelvis, spine):
         for path in ("location", "rotation_quaternion", "scale"):
             bone.keyframe_insert(path, frame=frame)
+    # The upper arms are not connected to the spine: moving their heads moves the shoulders, and
+    # the IK bends the elbows to keep the paws on the grips.
+    for side in ("L", "R"):
+        arm = rig.pose.bones[f"upperarm.{side}"]
+        rest = arm.bone.matrix_local
+        arm.matrix_basis = rest.inverted() @ T(0.3 * shoulders, 0, shoulders) @ rest
+        arm.keyframe_insert("location", frame=frame)
 
 
 EAR_TWITCHES = {0: [150, 340], 1: [60, 205, 445]}  # ear index (right, left) -> start frames
@@ -3860,6 +3891,19 @@ def glance(frame, lead=0):
     eight frames before GLANCE[1]."""
     start, end = GLANCE
     return smoothstep(start - lead, start - lead + 5, frame) * (1.0 - smoothstep(end - 8, end, frame))
+
+
+def flare(frame, bump):
+    """Elbow flare envelope: up to 1 over four frames from the frame after the bump, back over
+    eighteen frames to 0.3, where the elbow settles."""
+    return smoothstep(bump + 1, bump + 5, frame) * (1.0 - 0.7 * smoothstep(bump + 10, bump + 28, frame))
+
+
+def hunch(frame):
+    """Shoulder hunch envelope: up to 1 over twelve frames from HUNCH[0], back to 0 over the last
+    twenty frames before HUNCH[1]."""
+    start, end, _ = HUNCH
+    return smoothstep(start, start + 12, frame) * (1.0 - smoothstep(end - 20, end, frame))
 
 
 def animate(scene, road, scooter, cam, cat):
@@ -3922,7 +3966,7 @@ def animate(scene, road, scooter, cam, cat):
                 - 0.04 * max(pitch, 0.0))
         # Breathing: about 0.45 Hz on the flat, up to twice that on the climb.
         breath_phase += 2 * math.pi * (0.45 + 0.45 * min(max(pitch, 0.0) / 0.25, 1.0)) / FPS
-        pose_cat(cat.rig, body_lean, drop, 0.015 * math.sin(breath_phase), frame)
+        pose_cat(cat.rig, body_lean, drop, 0.015 * math.sin(breath_phase), HUNCH[2] * hunch(frame), frame)
 
         # Ears fold back with speed and flutter in the wind; whiskers sweep back and flutter.
         wind = v / BASE_SPEED
@@ -3982,6 +4026,15 @@ def animate(scene, road, scooter, cam, cat):
         for f, sz in [(1, 1.0)] + blinks:
             eye.scale = (1.0, 1.0, sz)
             eye.keyframe_insert("scale", frame=f)
+
+    # The left elbow flares out after a bump and settles a little further out than before; a
+    # larger pole angle swings it out and up.
+    ik = cat.rig.pose.bones["forearm.L"].constraints["IK"]
+    rest = ik.pole_angle
+    bump = defect_frames[ELBOW_FLARE[0]]
+    for f in [1] + list(range(bump, bump + 30)):
+        ik.pole_angle = rest + ELBOW_FLARE[1] * flare(f, bump)
+        ik.keyframe_insert("pole_angle", frame=f)
 
     print(f"ride: x {ride_x[0]:.1f} -> {ride_x[-1]:.1f}, distance {travelled:.1f} m, "
           f"defects on the line at frames {defect_frames}")

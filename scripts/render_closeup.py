@@ -33,6 +33,8 @@ VIEWS = {
     "chest":(0.55, 0.2, 0.62, 0.1, 0.5),
     "paws": (0.42, 0.42, 0.62, 0.22, 0.53),  # left front paw on the grip
     "grip": (0.336, 0.264, 0.495, 0.2, 0.4),  # toes round the left grip, from the front and above
+    "elbow": (0.85, 0.3, 0.32, 0.1, 0.38),  # both arms from the front and below, for the elbow flare at frame 355
+    "shoulders": (-0.9, 0.5, 0.75, 0.05, 0.5),  # from behind, for the shoulder hunch at frame 125
     "tail": (-0.6, 0.4, 0.5, -0.2, 0.4),
 }
 
