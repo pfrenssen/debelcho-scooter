@@ -2934,6 +2934,35 @@ def toes(b, front, side, y, z, radius, mat):
         b.ellipsoid((front + reach, side * (y + dy), z), (radius * 1.1, radius, radius * 0.85), mat, segments=12, rings=6)
 
 
+GRIP_RADIUS = 0.0085
+PAW_Y = 0.12  # middle of the front paw on the grip, which runs from 0.09 to BAR_HALF_WIDTH
+GRIP_TOES = (-0.0185, -0.006, 0.006, 0.0185)  # across the paw, from the inner toe
+TOE_WIDTH = 0.0048  # half the width of a toe
+
+
+def grip_toes(b, side, y, mat):
+    """Four toes curled over the top and down the front of the handlebar grip, round the bar
+    axis at BAR_DESIGN; the middle two reach furthest down. Each toe is a chain of three
+    ellipsoids from the knuckle (at the top of the grip) to the tip."""
+    for k, dy in enumerate(GRIP_TOES):
+        tip = 20 if k in (1, 2) else 35  # degrees from the front of the grip, up towards the top
+        for angle, thick in ((100, 0.0058), (lerp(100, tip, 0.55), 0.0052), (tip, 0.0047)):
+            a = math.radians(angle)
+            out = Vector((math.cos(a), 0.0, math.sin(a)))
+            centre = BAR_DESIGN + out * (GRIP_RADIUS + thick) + Vector((0, side * (y + dy), 0))
+            b.ellipsoid(centre, (thick, TOE_WIDTH, 0.0065), mat, rot=R(-a, 'Y'), segments=12, rings=6)
+
+
+def toe_clefts(obj, side, y):
+    """Press grooves between the grip toes, which the remesh has fused (in the body's frame)."""
+    for dy in [(a + b) / 2 for a, b in zip(GRIP_TOES, GRIP_TOES[1:])]:
+        for angle in (100, 70, 40):
+            a = math.radians(angle)
+            out = Vector((math.cos(a), 0.0, math.sin(a)))
+            centre = BAR_DESIGN + out * (GRIP_RADIUS + 0.008) + Vector((0, side * (y + dy), 0))
+            sculpt(obj, centre - CAT_PIVOT, (0.008, 0.0028, 0.008), 0.0018)
+
+
 class Cat:
     """Animated parts of the cat. Ears (the pivots that bend them), eyes and whiskers are ordered
     (right, left)."""
@@ -2950,8 +2979,8 @@ def hind_joints(s):
 
 def front_joints(s):
     return {"shoulder": Vector((0.07, s * 0.055, 0.455)), "elbow": Vector((0.12, s * 0.105, 0.40)),
-            "wrist": BAR_DESIGN + Vector((-0.025, s * 0.126, -0.005)),
-            "toes": BAR_DESIGN + Vector((0.013, s * 0.135, 0.009))}
+            "wrist": BAR_DESIGN + Vector((-0.025, s * (PAW_Y - 0.002), -0.005)),
+            "toes": BAR_DESIGN + Vector((0.013, s * PAW_Y, 0.009))}
 
 
 def cat_bones():
@@ -3062,8 +3091,8 @@ def front_leg(b, s, mat):
     b.ellipsoid((0.05, s * 0.058, 0.475), (0.03, 0.022, 0.048), mat, rot=R(math.radians(30), 'Y'))
     segment(b, shoulder, elbow, 0.026, 0.028, 0.01, mat)
     b.limb(elbow, wrist, 0.019, 0.014, mat)
-    b.ellipsoid(BAR_DESIGN + Vector((-0.008, s * 0.135, 0.014)), (0.022, 0.024, 0.016), mat)
-    toes(b, BAR_DESIGN.x + 0.009, s, 0.135, BAR_DESIGN.z + 0.009, 0.0085, mat)
+    b.ellipsoid(BAR_DESIGN + Vector((-0.012, s * PAW_Y, 0.014)), (0.02, 0.021, 0.015), mat)
+    grip_toes(b, s, PAW_Y, mat)
 
 
 KERCHIEF_LIFT = 0.004  # cloth above the skin; the fur under the cloth is removed
@@ -3171,7 +3200,7 @@ def build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top):
 
 
 BODY_FUR = {"pelvis": 0.014, "spine": 0.014, "neck": 0.012, "thigh": 0.013, "shin": 0.009, "foot": 0.005,
-            "upperarm": 0.014, "forearm": 0.012, "paw": 0.005}  # fur length by bone
+            "upperarm": 0.014, "forearm": 0.012, "paw": 0.0025}  # fur length by bone; the toes show
 CHEST_FUR = 0.019
 
 
@@ -3216,15 +3245,23 @@ def build_cat(mats, coll, scooter_body):
         front_leg(b, s, FUR)
     body = b.to_object("CatBody", [mats["fur"]], coll, cat_rig)
     remesh(body, 0.0035, 8)
+    for s in (-1, 1):
+        toe_clefts(body, s, PAW_Y)
     cloth = build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top)
     # No fur under the cloth.
     tree = kdtree.KDTree(len(cloth))
     for k, co in enumerate(cloth):
         tree.insert(co, k)
     tree.balance()
+    # The front paws have a fur system of their own: the coat's guide strands are too far apart
+    # to follow the toes, so its children there take the length of the forearm.
+    paws = [BAR_DESIGN + Vector((-0.004, s * PAW_Y, 0.006)) - CAT_PIVOT for s in (-1, 1)]
     bare = body.vertex_groups.new(name="FurDensity")
+    paw = body.vertex_groups.new(name="PawFur")
     for v in body.data.vertices:
-        bare.add([v.index], smoothstep(0.0045, 0.0065, tree.find(v.co)[2]), 'REPLACE')
+        on_paw = smoothstep(0.036, 0.028, min((v.co - p).length for p in paws))
+        bare.add([v.index], smoothstep(0.0045, 0.0065, tree.find(v.co)[2]) * (1.0 - on_paw), 'REPLACE')
+        paw.add([v.index], on_paw, 'REPLACE')
     skin(body, cat_rig)
     add_fur(body, mats, 5000, 0.011, (-1.0, 0.0, -0.6), density_group=bare.name)
     settings = body.particle_systems[-1].settings
@@ -3240,6 +3277,14 @@ def build_cat(mats, coll, scooter_body):
     settings.roughness_1 = 0.003
     settings.roughness_endpoint = 0.004
     comb_fur(body, lambda root, normal: (groom(root, normal)[0], 1.7 * groom(root, normal)[1]), lift=(0.8, 0.35))
+    add_fur(body, mats, 1500, BODY_FUR["paw"], (-1.0, 0.0, -0.6), density_group=paw.name)
+    settings = body.particle_systems[-1].settings
+    settings.radius_scale = 0.0003  # roughness and thickness to scale with the short strands
+    settings.roughness_1 = 0.0004
+    settings.roughness_endpoint = 0.0003
+    # Sparse, so the skin shows the toes: EEVEE shades strips as facing the camera, without form.
+    settings.rendered_child_count = 8
+    comb_fur(body, lambda root, normal: (groom(root, normal)[0], BODY_FUR["paw"]), lift=(0.4, 0.1))
 
     tail_curve = build_tail(mats, coll, cat_rig)
     head_rig, ears, eyes, whiskers = build_head(mats, coll, cat_rig)

@@ -31,6 +31,7 @@ VIEWS = {
     "flank": (0.0, 0.45, 0.42, -0.02, 0.38),  # fur texture on the left side
     "chest":(0.55, 0.2, 0.62, 0.1, 0.5),
     "paws": (0.42, 0.42, 0.62, 0.22, 0.53),  # left front paw on the grip
+    "grip": (0.336, 0.264, 0.495, 0.2, 0.4),  # toes round the left grip, from the front and above
     "tail": (-0.6, 0.4, 0.5, -0.2, 0.4),
 }
 

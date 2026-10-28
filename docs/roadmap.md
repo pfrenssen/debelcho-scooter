@@ -15,9 +15,7 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
 - **Body volume.** The sleek, close-lying coat no longer bulks the body out, so the cat reads
   leaner than the stocky cat in the photo, most of all in the arms. Widen the limb and torso
   ellipsoids by about 5–8 mm; check the kerchief fit, the paws on the grips and the handlebar
-  clearance. Best done together with the toes.
-- **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
-  them so each toe wraps the grip.
+  clearance.
 - **Notice the camera.** Around frame 260 the cat should briefly glance towards the camera on
   its left, as if it notices or acknowledges the camera's presence. This will break the fixed
   head position throughout the entire clip and give more life to the scene.
