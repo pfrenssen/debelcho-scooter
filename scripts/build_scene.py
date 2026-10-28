@@ -190,6 +190,10 @@ GRADE_SHADOW_TINT = (0.0, 0.001, 0.002)  # added on top per channel; the colour 
 GRADE_SLOPE = (1.03, 1.0, 0.97)
 GRADE_SATURATION = 1.12
 BLINKS = [88, 176, 300, 420]
+GLANCE = (262, 292)  # frames: the cat turns its head to the camera on its left, and back
+GLANCE_HEAD = (0.8, 1.0)  # the head turns this fraction of the way, at most this far (radians)
+GAZE_SHIFT = 0.002  # metres the pupils move sideways at most: the eyes turn the rest of the way
+SLOW_BLINK = (274, 0.3)  # start frame and the lids' opening at the middle of a slow blink at the camera
 
 
 def smoothstep(e0, e1, x):
@@ -1102,8 +1106,13 @@ def eye_material():
     nt = mat.node_tree
     bsdf = principled_node(mat)
     coord = nt.nodes.new('ShaderNodeTexCoord')
+    # The gaze: animate() keys a sideways shift of the iris and the pupil, as the eye turns.
+    gaze = nt.nodes.new('ShaderNodeVectorMath')
+    gaze.name = "Gaze"
+    gaze.operation = 'SUBTRACT'
+    nt.links.new(coord.outputs['Object'], gaze.inputs[0])
     local = nt.nodes.new('ShaderNodeSeparateXYZ')
-    nt.links.new(coord.outputs['Object'], local.inputs[0])
+    nt.links.new(gaze.outputs['Vector'], local.inputs[0])
     y, z = local.outputs['Y'], local.outputs['Z']
     iris_radius = 0.92 * EYE_RADII[1]
 
@@ -1136,7 +1145,7 @@ def eye_material():
     mottle = nt.nodes.new('ShaderNodeTexNoise')
     mottle.inputs['Scale'].default_value = 250.0
     mottle.inputs['Detail'].default_value = 2.0
-    nt.links.new(coord.outputs['Object'], mottle.inputs['Vector'])
+    nt.links.new(gaze.outputs['Vector'], mottle.inputs['Vector'])
     # The gold ring round the pupil has a ragged edge.
     ragged = math_node(nt, 'ADD', r, math_node(nt, 'MULTIPLY', math_node(nt, 'SUBTRACT', patches, 0.5), 0.6))
     iris = mix_colour(nt, smooth_range(nt, ragged, 0.2, 0.45), (0.3, 0.27, 0.11), (0.22, 0.27, 0.16))
@@ -3846,12 +3855,20 @@ def twitch(frame, starts):
     return max((max(0.0, 1.0 - abs(frame - start - 3) / 4.0) for start in starts), default=0.0)
 
 
+def glance(frame, lead=0):
+    """Glance envelope: up to 1 over five frames from GLANCE[0] - lead, back to 0 over the last
+    eight frames before GLANCE[1]."""
+    start, end = GLANCE
+    return smoothstep(start - lead, start - lead + 5, frame) * (1.0 - smoothstep(end - 8, end, frame))
+
+
 def animate(scene, road, scooter, cam, cat):
     """Keys the ride, the cat and the camera. Returns the x range of the ride and, for each
     frame, the camera position, the point it looks at and its focal length."""
     bpy.context.preferences.edit.keyframe_new_interpolation_type = 'LINEAR'
     rig, wheels = scooter.rig, scooter.wheels
     head_rig, tail = cat.head, cat.tail
+    gaze = cat.eyes[0].data.materials[0].node_tree.nodes["Gaze"].inputs[1]
     ear_rest = [ear.rotation_euler.copy() for ear in cat.ears]
     breath_phase = 0.0
     s = start = road.arc_length_at_x(RIDE_START_X)
@@ -3906,12 +3923,6 @@ def animate(scene, road, scooter, cam, cat):
         # Breathing: about 0.45 Hz on the flat, up to twice that on the climb.
         breath_phase += 2 * math.pi * (0.45 + 0.45 * min(max(pitch, 0.0) / 0.25, 1.0)) / FPS
         pose_cat(cat.rig, body_lean, drop, 0.015 * math.sin(breath_phase), frame)
-        # Cats keep their head level: counter the scooter's lean and the body's lean, and look
-        # into the turn. The neck spring adds a nod that lags each bump.
-        nod = min(max(susp.head * 15.0, -0.2), 0.08)  # chin down only a little: the bar is below it
-        head_rig.rotation_euler = (lean * 0.6, 0.05 * math.sin(2 * math.pi * 0.5 * t) - body_lean * 0.7 + nod,
-                                   min(max(kappa * 1.5, -0.25), 0.25))
-        head_rig.keyframe_insert("rotation_euler", frame=frame)
 
         # Ears fold back with speed and flutter in the wind; whiskers sweep back and flutter.
         wind = v / BASE_SPEED
@@ -3946,12 +3957,29 @@ def animate(scene, road, scooter, cam, cat):
         cam.data.lens = lens
         cam.data.keyframe_insert("lens", frame=frame)
 
+        # Cats keep their head level: counter the scooter's lean and the body's lean, and look
+        # into the turn. The neck spring adds a nod that lags each bump. During the glance the
+        # eyes turn to the camera first and the head follows.
+        nod = min(max(susp.head * 15.0, -0.2), 0.08)  # chin down only a little: the bar is below it
+        to_cam = q.inverted() @ (cam_pos - pos - q @ (NECK + CAT_OFFSET))
+        look = math.atan2(to_cam.y, to_cam.x)
+        turn = lerp(min(max(kappa * 1.5, -0.25), 0.25), min(GLANCE_HEAD[0] * look, GLANCE_HEAD[1]), glance(frame))
+        head_rig.rotation_euler = (lean * 0.6, 0.05 * math.sin(2 * math.pi * 0.5 * t) - body_lean * 0.7 + nod, turn)
+        head_rig.keyframe_insert("rotation_euler", frame=frame)
+        shift = min(max(EYE_RADII[0] * math.sin(look - turn), -GAZE_SHIFT), GAZE_SHIFT)
+        gaze.default_value = (0.0, shift * glance(frame, lead=2), 0.0)
+        gaze.keyframe_insert("default_value", frame=frame)
+
         susp.advance(road, s, v / FPS, v)
         travelled += v / FPS
         s += v / FPS
 
+    # Quick blinks, and a slow blink at the camera during the glance.
+    blinks = [(b + df, sz) for b in BLINKS for df, sz in ((0, 1.0), (2, 0.1), (5, 1.0))]
+    start, opening = SLOW_BLINK
+    blinks += [(start + df, sz) for df, sz in ((0, 1.0), (4, opening), (7, opening), (13, 1.0))]
     for eye in cat.eyes:
-        for f, sz in [(1, 1.0)] + [(b + df, sz) for b in BLINKS for df, sz in ((0, 1.0), (2, 0.1), (5, 1.0))]:
+        for f, sz in [(1, 1.0)] + blinks:
             eye.scale = (1.0, 1.0, sz)
             eye.keyframe_insert("scale", frame=f)
 

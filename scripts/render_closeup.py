@@ -25,6 +25,7 @@ VIEWS = {
     "head-front": (0.5, 0.0, 0.64, 0.13, 0.6),
     "head-near": (0.4, 0.13, 0.64, 0.14, 0.6),  # face fills the frame
     "eyes": (0.5, 0.18, 0.63, 0.15, 0.605),  # both eyes, from the side the cat looks to at frame 300
+    "glance": (0.325, 0.567, 0.6, 0.13, 0.6),  # from where the cat looks at frame 270, in its glance
     "ears-q": (0.4, 0.12, 0.72, 0.11, 0.69),  # into the cups
     "ears-back": (-0.05, 0.3, 0.74, 0.11, 0.69),
     "body-side": (0.0, 1.6, 0.42, 0.0, 0.4),  # whole cat from the left
