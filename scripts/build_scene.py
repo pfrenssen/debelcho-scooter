@@ -17,7 +17,7 @@ import bmesh
 import bpy
 import numpy as np
 from bpy_extras import anim_utils
-from mathutils import Matrix, Vector, kdtree, noise
+from mathutils import Matrix, Quaternion, Vector, kdtree, noise
 from mathutils.bvhtree import BVHTree
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +25,9 @@ BLEND_PATH = ROOT / "build" / "cat_scooter.blend"
 TEXTURES = ROOT / "assets" / "textures"  # fetched by scripts/fetch_assets.py
 
 FPS = 24
-FRAME_END = 480
+RIDE_END = 480  # last frame of the ride; the crash of the camera follows
+CRASH_FRAMES = 12
+FRAME_END = RIDE_END + CRASH_FRAMES
 SEED = 7
 
 TERRAIN_SIZE = 260.0
@@ -180,6 +182,16 @@ CAMERA_KEYS = [
 # Handheld shake: noise on the camera's rotation, (strength in radians, period in frames) per
 # axis: tilt, pan, roll.
 SHAKE = [(0.010, 28.0), (0.012, 34.0), (0.006, 40.0)]
+# The ending: on the frame after RIDE_END the camera's own scooter, a full-size copy of the cat's,
+# runs its front wheel into a granite block on the verge. The scooter kicks up its rear and falls
+# on its side; the camera breaks loose and tumbles forward until it hits the ground.
+CRASH_KICK = (3.0, 10.0)  # rad/s the scooter's rear kicks up at, and rad/s² it falls back at
+CRASH_TOPPLE = 4.0  # rad/s² the scooter falls to its right side at
+CRASH_ARM = 0.6  # metres the camera rides to the right of its scooter
+CRASH_LEAD = 0.1  # metres the scooter's rear tyre runs ahead of the camera, out of its view
+CRASH_SPIN = 15.0  # rad/s the camera tumbles forward at: it looks back at the block as it lands
+CRASH_ROLL = 3.0  # rad/s the camera rolls about its view axis at
+CRASH_KEEP = 0.9  # fraction of its velocity the camera keeps at the impact
 BLOOM_MAXIMUM = 300.0  # highlights are clamped to this before the bloom: the sun disc flooded the frame; 50 or less leaves a hard round disc
 VIGNETTE = 0.15  # darkening at distance 1 from the centre (half the frame width), growing with r²
 GRAIN = 0.08  # film grain amplitude as a fraction of the linear pixel value, before the AgX view
@@ -2777,6 +2789,37 @@ def build_scooter(mats, coll):
     return Scooter(rig, body, front, rear, wheels, arm, springs, target)
 
 
+CREW_PARTS = ("ScooterFrame", "BrakeCable", "WheelFront", "WheelRear", "ForkLower", "RearArm",
+              "FrontGaiterL", "FrontGaiterR", "RearShockL", "RearShockR")
+
+
+def build_crew_scooter(mats, coll):
+    """The camera's scooter: a copy of the cat's at its rest pose, scaled to full size by crash(),
+    grey and with its lights off. Call before animate() moves the original. Returns the rig and
+    the parts by the name of the original."""
+    bpy.context.view_layer.update()
+    rig = make_empty("CrewScooterRig", coll, size=0.3)
+    rig.rotation_mode = 'QUATERNION'
+    paint = make_material("CrewPaint", (0.25, 0.26, 0.27), 0.35, metallic=0.6, inputs={"Coat Weight": 0.5})
+    swap = {mats["frame"]: paint, **{mats[k]: mats["plastic"] for k in ("headlight", "brakelight", "screen",
+                                                                        "underglow", "amber")}}
+    parts = {}
+    for name in CREW_PARTS:
+        src = bpy.data.objects[name]
+        part = src.copy()
+        part.name = "Crew" + name
+        coll.objects.link(part)
+        part.parent = rig
+        part.matrix_parent_inverse.identity()
+        part.matrix_basis = src.matrix_world
+        for slot in part.material_slots:
+            mat = slot.material
+            slot.link = 'OBJECT'
+            slot.material = swap.get(mat, mat)
+        parts[name] = part
+    return rig, parts
+
+
 def remesh(obj, voxel_size, smooth_iterations):
     """Merge overlapping primitives into one closed surface, so fur grows only on the outside."""
     rm = obj.modifiers.new("Remesh", 'REMESH')
@@ -3928,8 +3971,9 @@ def hunch(frame):
 
 
 def animate(scene, road, scooter, cam, cat):
-    """Keys the ride, the cat and the camera. Returns the x range of the ride and, for each
-    frame, the camera position, the point it looks at and its focal length."""
+    """Keys the ride, the cat and the camera. Returns the x range of the ride up to RIDE_END and,
+    for each frame up to the one after it, the camera position, the point it looks at and its
+    focal length."""
     bpy.context.preferences.edit.keyframe_new_interpolation_type = 'LINEAR'
     rig, wheels = scooter.rig, scooter.wheels
     head_rig, tail = cat.head, cat.tail
@@ -3952,7 +3996,8 @@ def animate(scene, road, scooter, cam, cat):
         t = (frame - 1) / FPS
         centre, tan, nrm = road.sample(s)
         pos = centre + nrm * LANE_OFFSET
-        ride_x.append(pos.x)
+        if frame <= RIDE_END:
+            ride_x.append(pos.x)
 
         slope = tan.z / max(Vector((tan.x, tan.y)).length, 1e-6)
         v += (BASE_SPEED * min(max(1.0 - 1.8 * slope, 0.55), 1.5) - v) * 0.06
@@ -4008,19 +4053,21 @@ def animate(scene, road, scooter, cam, cat):
             point.co = (x, y + sway, z, 1.0)
             point.keyframe_insert("co", frame=frame)
 
-        cam_h = heading(tan)
-        cam_heading = cam_h if cam_heading is None else cam_heading + wrap_angle(cam_h - cam_heading) * 0.08
-        angle, dist, height, lens = catmull_rom(CAMERA_KEYS, frame)
-        a = cam_heading + math.radians(angle)
-        cam_pos = pos + Vector((math.cos(a), math.sin(a), 0.0)) * dist + Vector((0, 0, height))
-        # Keep 0.25 m above the road and 0.45 m above the verge, clear of the grass.
-        verge = smoothstep(ROAD_HALF_WIDTH - 0.2, ROAD_HALF_WIDTH + 0.3, road.distance(cam_pos.x, cam_pos.y)[1])
-        cam_pos.z = max(cam_pos.z, road.terrain_height(cam_pos.x, cam_pos.y) + 0.25 + 0.2 * verge)
-        cam.parent.location = cam_pos
-        cam.parent.keyframe_insert("location", frame=frame)
-        cam_path.append((cam_pos, pos + Vector((0, 0, 0.33)), lens))  # the camera tracks the scooter
-        cam.data.lens = lens
-        cam.data.keyframe_insert("lens", frame=frame)
+        # The camera follows the ride up to the frame of the crash, which crash() keys from there.
+        if frame <= RIDE_END + 1:
+            cam_h = heading(tan)
+            cam_heading = cam_h if cam_heading is None else cam_heading + wrap_angle(cam_h - cam_heading) * 0.08
+            angle, dist, height, lens = catmull_rom(CAMERA_KEYS, frame)
+            a = cam_heading + math.radians(angle)
+            cam_pos = pos + Vector((math.cos(a), math.sin(a), 0.0)) * dist + Vector((0, 0, height))
+            # Keep 0.25 m above the road and 0.45 m above the verge, clear of the grass.
+            verge = smoothstep(ROAD_HALF_WIDTH - 0.2, ROAD_HALF_WIDTH + 0.3, road.distance(cam_pos.x, cam_pos.y)[1])
+            cam_pos.z = max(cam_pos.z, road.terrain_height(cam_pos.x, cam_pos.y) + 0.25 + 0.2 * verge)
+            cam.parent.location = cam_pos
+            cam.parent.keyframe_insert("location", frame=frame)
+            cam_path.append((cam_pos, pos + Vector((0, 0, 0.33)), lens))  # the camera tracks the scooter
+            cam.data.lens = lens
+            cam.data.keyframe_insert("lens", frame=frame)
 
         # Cats keep their head level: counter the scooter's lean and the body's lean, and look
         # into the turn. The neck spring adds a nod that lags each bump. During the glance the
@@ -4060,6 +4107,115 @@ def animate(scene, road, scooter, cam, cat):
     print(f"ride: x {ride_x[0]:.1f} -> {ride_x[-1]:.1f}, distance {travelled:.1f} m, "
           f"defects on the line at frames {defect_frames}")
     return (ride_x[0], ride_x[-1]), cam_path
+
+
+def appear(obj, frame):
+    """Keys the object hidden from the render before the (sub)frame."""
+    for f, hidden in ((1, True), (frame, False)):
+        obj.hide_render = hidden
+        obj.keyframe_insert("hide_render", frame=f)
+
+
+def crash(cam, crew, cam_path, mats, coll, ground):
+    """Keys the ending and builds the block it happens on. On the frame after RIDE_END the
+    camera's scooter, with the camera beside it, runs its front wheel into a granite block: its
+    rear kicks up and falls back while it topples onto its right side. The camera breaks loose
+    with its momentum, tumbles forward past the block and stops where it hits the ground.
+    cam_path holds the camera's last frame of the ride and the one after it. The scooter and the
+    block appear half a frame after RIDE_END, when the shutter of that frame has closed."""
+    rig, parts = crew
+    impact = RIDE_END + 1
+    (p0, _, _), (p1, target, _) = cam_path
+    v = (p1 - p0) * FPS
+    flat = Vector((v.x, v.y, 0.0))
+    speed, d = flat.length, flat.normalized()
+    across = Vector((0, 0, 1)).cross(d)  # turning about it tips the top forward
+    yaw = math.atan2(d.y, d.x)
+    k = 1.0 / SCOOTER_SCALE
+
+    # The scooter at rest along the slope of the ground, beside the camera and ahead of it.
+    origin = p1 + d * ((WHEEL_R - REAR_AXLE.x) * k + CRASH_LEAD) + across * CRASH_ARM
+    front, rear = (origin + d * axle.x * k for axle in (FRONT_AXLE, REAR_AXLE))
+    hf, hr = ground(front.x, front.y), ground(rear.x, rear.y)
+    span = (FRONT_AXLE.x - REAR_AXLE.x) * k
+    z = lerp(hr, hf, -REAR_AXLE.x * k / span)
+    rest = T(origin.x, origin.y, z) @ R(yaw, 'Z') @ R(-math.atan2(hf - hr, span), 'Y') @ S(k, k, k)
+
+    # The block stands against the front of the tyre.
+    rng = random.Random(SEED + 8)
+    size = [c * rng.uniform(0.9, 1.1) for c in STONE_SIZE]
+    contact = rest @ (FRONT_AXLE + Vector((WHEEL_R, 0.0, 0.0)))
+    centre = contact + d * size[0] / 2
+    half = max(size[:2]) / 2
+    base = min(ground(centre.x + dx, centre.y + dy) for dx in (-half, half) for dy in (-half, half))
+    b = MeshBuilder()
+    b.hewn_box(T(centre.x, centre.y, base) @ R(yaw + rng.uniform(-0.1, 0.1), 'Z') @ R(rng.uniform(-0.06, 0.06), 'X'),
+               (size[0], size[1], size[2] + 0.15), rng, bury=0.15)
+    block = b.to_object("CrashStone", [mats["granite"]], coll)
+
+    # The scooter rides on to the block, then turns about the tyre's contact with it and about
+    # the ground under that, along the ride.
+    pivot = contact.copy()
+    pivot.z = ground(contact.x, contact.y)
+    for f in range(impact - 1, FRAME_END + 1):
+        t = (f - impact) / FPS
+        kick = max(CRASH_KICK[0] * t - 0.5 * CRASH_KICK[1] * t * t, 0.0)
+        topple = min(0.5 * CRASH_TOPPLE * max(t, 0.0) ** 2, 1.4)
+        m = (T(*pivot) @ Matrix.Rotation(topple, 4, d) @ T(*-pivot)
+             @ T(*contact) @ Matrix.Rotation(kick, 4, across) @ T(*-contact) @ rest)
+        if t < 0.0:
+            m = T(*(flat * t)) @ m
+        rig.matrix_basis = m
+        rig.keyframe_insert("location", frame=f)
+        rig.keyframe_insert("rotation_quaternion", frame=f)
+        rig.keyframe_insert("scale", frame=f)
+        # The front wheel stops at the block; the rear one spins on.
+        for name in ("WheelFront", "WheelRear"):
+            wheel = parts[name]
+            wheel.rotation_euler.y = speed * (min(t, 0.0) if name == "WheelFront" else t) / (WHEEL_R * k)
+            wheel.keyframe_insert("rotation_euler", frame=f)
+
+    # The camera flies on along a ballistic arc, turning about its rest orientation, the one the
+    # track constraint gave it, until the constraint is off.
+    rig_cam = cam.parent
+    track = rig_cam.constraints[0]
+    for f, influence in ((impact, 1.0), (impact + 1, 0.0)):
+        track.influence = influence
+        track.keyframe_insert("influence", frame=f)
+    q0 = (target - p1).to_track_quat('-Z', 'Y')
+
+    def flight(t, lift):
+        return p1 + (v * CRASH_KEEP + Vector((0, 0, lift))) * t + Vector((0, 0, -4.905 * t * t))
+
+    def clearance(t, lift):
+        pos = flight(t, lift)
+        return pos.z - ground(pos.x, pos.y) - 0.1
+
+    # The kick throws the camera up just enough that it lands half a frame before the last one.
+    land, lo, hi = (CRASH_FRAMES - 1.5) / FPS, 0.0, 10.0
+    for _ in range(30):
+        lift = (lo + hi) / 2
+        lo, hi = (lift, hi) if clearance(land, lift) < 0.0 else (lo, lift)
+    landed = None
+    for f in range(impact, FRAME_END + 1):
+        t = (f - impact) / FPS
+        pos = flight(t, lift)
+        floor = ground(pos.x, pos.y) + 0.1
+        if pos.z <= floor:
+            pos.z, landed = floor, f
+        rig_cam.location = pos
+        q = Quaternion(across, CRASH_SPIN * t) @ q0 @ Quaternion((0, 0, 1), CRASH_ROLL * t)
+        rig_cam.rotation_euler = q.to_euler('XYZ', rig_cam.rotation_euler)
+        rig_cam.keyframe_insert("location", frame=f)
+        rig_cam.keyframe_insert("rotation_euler", frame=f)
+        if landed:
+            break
+
+    for obj in (block, *parts.values()):
+        appear(obj, RIDE_END + 0.5)
+    print(f"crash: speed {speed:.2f} m/s, block at ({centre.x:.2f}, {centre.y:.2f}, {base:.2f}), "
+          f"camera {p1.z - ground(p1.x, p1.y):.2f} m above the ground, thrown up at {lift:.2f} m/s, "
+          f"lands at frame {landed} of {FRAME_END}")
 
 
 # --------------------------------------------------------------------------- scene
@@ -4180,10 +4336,13 @@ def main():
     road.place_defects(road.arc_length_at_x(RIDE_START_X), random.Random(SEED + 6))
 
     scooter = build_scooter(mats, actors)
+    crew = build_crew_scooter(mats, actors)
     cat = build_cat(mats, actors, scooter.body)
 
     cam = build_camera(scene, scooter.target)
     ride_x, cam_path = animate(scene, road, scooter, cam, cat)
+    # The ride alone places the scenery, so the crash leaves the frames before it as they were.
+    cam_path, crash_path = cam_path[:RIDE_END], cam_path[RIDE_END - 1:]
     road.sun_cap = SunCap([target for _, target, _ in cam_path[::6]])  # the camera looks at the cat
 
     terrain = build_terrain(road, mats, env, ride_x, cam_path)
@@ -4194,6 +4353,7 @@ def main():
     build_drains(road, mats, env)
     build_verge_dirt(road, mats, env, ground)
     build_guard_stones(road, mats, env, cam_path)
+    crash(cam, crew, crash_path, mats, env, ground)
     build_barn(road, mats, env)
     scatter_trees(road, env, rng, ride_x, cam_path)
     scatter_rocks(road, mats, env, rng, ride_x)
