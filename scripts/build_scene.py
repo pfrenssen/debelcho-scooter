@@ -3076,9 +3076,9 @@ def hind_leg(b, s, mat):
     """Standing on the hind legs: thigh forward to the knee, shin back down to the hock,
     and the foot flat on the deck from the hock to the toes."""
     hip, knee, hock, ball = hind_joints(s).values()
-    b.ellipsoid((-0.085, s * 0.04, 0.215), (0.06, 0.04, 0.06), mat)  # haunch
-    segment(b, hip, knee, 0.03, 0.04, 0.015, mat)
-    b.limb(knee, hock, 0.02, 0.013, mat)
+    b.ellipsoid((-0.085, s * 0.04, 0.215), (0.066, 0.046, 0.066), mat)  # haunch
+    segment(b, hip, knee, 0.036, 0.046, 0.015, mat)
+    b.limb(knee, hock, 0.025, 0.017, mat)
     b.ellipsoid(hock, (0.016, 0.013, 0.014), mat, segments=12, rings=6)
     b.limb(hock + Vector((0.01, 0, 0)), ball, 0.0125, 0.015, mat)
     toes(b, ball.x + 0.012, s, 0.052, 0.126, 0.0085, mat)
@@ -3088,9 +3088,9 @@ def front_leg(b, s, mat):
     """Shoulder blade, upper arm out to the elbow, forearm up to the wrist, and a paw whose
     toes curl over the front of the handlebar grip."""
     shoulder, elbow, wrist, _ = front_joints(s).values()
-    b.ellipsoid((0.05, s * 0.058, 0.475), (0.03, 0.022, 0.048), mat, rot=R(math.radians(30), 'Y'))
-    segment(b, shoulder, elbow, 0.026, 0.028, 0.01, mat)
-    b.limb(elbow, wrist, 0.019, 0.014, mat)
+    b.ellipsoid((0.05, s * 0.058, 0.475), (0.032, 0.023, 0.05), mat, rot=R(math.radians(30), 'Y'))
+    segment(b, shoulder, elbow, 0.03, 0.034, 0.01, mat)
+    b.limb(elbow, wrist, 0.026, 0.019, mat)
     b.ellipsoid(BAR_DESIGN + Vector((-0.012, s * PAW_Y, 0.014)), (0.02, 0.021, 0.015), mat)
     grip_toes(b, s, PAW_Y, mat)
 
@@ -3234,12 +3234,12 @@ def build_cat(mats, coll, scooter_body):
     FUR = 0
 
     b = MeshBuilder(CAT_PIVOT)
-    b.ellipsoid((-0.005, 0, 0.34), (0.085, 0.08, 0.16), FUR, rot=R(math.radians(34), 'Y'))
-    b.ellipsoid((0.055, 0, 0.44), (0.075, 0.072, 0.08), FUR)
+    b.ellipsoid((-0.005, 0, 0.34), (0.091, 0.087, 0.165), FUR, rot=R(math.radians(34), 'Y'))
+    b.ellipsoid((0.055, 0, 0.44), (0.081, 0.078, 0.085), FUR)
     # Neck from the chest up into the back of the skull; its top end stays inside the head
     # when the head turns about NECK.
     neck_base, neck_top = Vector((0.06, 0, 0.47)), Vector((0.105, 0, 0.58))
-    b.limb(neck_base, neck_top, 0.06, 0.05, FUR)
+    b.limb(neck_base, neck_top, 0.064, 0.053, FUR)
     for s in (-1, 1):
         hind_leg(b, s, FUR)
         front_leg(b, s, FUR)
