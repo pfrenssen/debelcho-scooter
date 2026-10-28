@@ -12,13 +12,6 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
   sets behind the hill). From frame 85 to 165 the cat climbs a stretch steeper than the 4° sun,
   so the road ahead shades it. Easing that grade, or a light linked to the cat for those frames,
   would keep it in the sun.
-- **Chest fur through the kerchief.** Strands poke through the hanging triangle, most visibly
-  in Cycles (the `chest` view). The fur is removed only where the skin is within about 5 mm of
-  a cloth vertex (`FurDensity` in `build_cat`), but the chest fur is 19 mm long and the guard
-  hairs 1.7 times that, so strands rooted round the cloth can still reach through it. Interpolated
-  children can also land in the bare zone. Find which system pokes through first (render one
-  particle system at a time); then shorten or comb away the strands near the cloth, or cut
-  them where they meet it.
 
 ## Environment
 

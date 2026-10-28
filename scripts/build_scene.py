@@ -2900,11 +2900,12 @@ def add_fur(obj, mats, count, length, direction, density_group=None, strands="st
         psys.vertex_group_density = density_group
 
 
-def comb_fur(obj, groom, lift=(0.35, 0.05)):
+def comb_fur(obj, groom, lift=(0.35, 0.05), obstacle=None):
     """Lay the guide strands of obj's last particle system along the skin. groom(root, normal)
     gives the direction to comb a strand in and its length, both in object space; the strand
-    leaves the skin at lift[0] rad and bends over to lift[1] rad at the tip. The particle edit
-    toggle copies the grown strands into the original data, where the keys can be set."""
+    leaves the skin at lift[0] rad and bends over to lift[1] rad at the tip. A strand that would
+    cross obstacle (a BVH tree in object space) is shortened to end 1 mm before it. The particle
+    edit toggle copies the grown strands into the original data, where the keys can be set."""
     bpy.context.view_layer.objects.active = obj
     obj.particle_systems.active_index = len(obj.particle_systems) - 1
     bpy.ops.object.mode_set(mode='PARTICLE_EDIT')
@@ -2924,11 +2925,32 @@ def comb_fur(obj, groom, lift=(0.35, 0.05)):
         tangent.normalize()
         length *= rng.uniform(0.8, 1.2)
         steps = len(p.hair_keys) - 1
-        co = root.copy()
-        for k, key in enumerate(p.hair_keys):
+        bends = [tangent * math.cos(angle) + normal * math.sin(angle)
+                 for angle in (lerp(lift[0], lift[1], k / steps) for k in range(steps))]
+
+        def path(length):
+            points = [root]
+            for bend in bends:
+                points.append(points[-1] + bend * length / steps)
+            return points
+
+        def reach(points, length):
+            """Distance along the strand to where it first crosses the obstacle, or None."""
+            for k, (a, bend) in enumerate(zip(points, bends)):
+                distance = obstacle.ray_cast(a, bend, length / steps)[3]
+                if distance is not None:
+                    return k * length / steps + distance
+            return None
+
+        points = path(length)
+        for _ in range(3):  # the shorter strand is the same curve scaled about the root
+            hit = reach(points, length) if obstacle else None
+            if hit is None:
+                break
+            length = max(hit - 0.001, 0.0005)
+            points = path(length)
+        for key, co in zip(p.hair_keys, points):
             key.co_object_set(ev, mod, ep, co)
-            angle = lerp(lift[0], lift[1], k / steps)
-            co = co + (tangent * math.cos(angle) + normal * math.sin(angle)) * length / steps
 
 
 def segment(b, p0, p1, width, depth, overhang, mat):
@@ -3137,7 +3159,7 @@ def build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top):
     knot with two short ends at the back. Each column of the cloth starts on the band's top edge
     at an angle round the neck and runs down over the body, found by casting rays out from the
     neck axis; smoothing then lets the cloth bridge the hollow between neck and chest.
-    Returns the cloth vertices in the body's frame."""
+    Returns a BVH tree of the cloth in the body's frame."""
     bvh = BVHTree.FromObject(body, bpy.context.evaluated_depsgraph_get())
     axis = (neck_top - neck_base).normalized()
     front = (Vector((1, 0, 0)) - axis * axis.x).normalized()
@@ -3228,7 +3250,7 @@ def build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top):
     solid = cloth.modifiers.new("Thickness", 'SOLIDIFY')
     solid.thickness = 0.0012
     solid.offset = 0.0
-    return [v.co.copy() for v in mesh.vertices]
+    return BVHTree.FromPolygons([v.co for v in mesh.vertices], [p.vertices for p in mesh.polygons])
 
 
 BODY_FUR = {"pelvis": 0.014, "spine": 0.014, "neck": 0.012, "thigh": 0.013, "shin": 0.009, "foot": 0.005,
@@ -3280,11 +3302,6 @@ def build_cat(mats, coll, scooter_body):
     for s in (-1, 1):
         toe_clefts(body, s, PAW_Y)
     cloth = build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top)
-    # No fur under the cloth.
-    tree = kdtree.KDTree(len(cloth))
-    for k, co in enumerate(cloth):
-        tree.insert(co, k)
-    tree.balance()
     # The front paws have a fur system of their own: the coat's guide strands are too far apart
     # to follow the toes, so its children there take the length of the forearm.
     paws = [BAR_DESIGN + Vector((-0.004, s * PAW_Y, 0.006)) - CAT_PIVOT for s in (-1, 1)]
@@ -3292,7 +3309,10 @@ def build_cat(mats, coll, scooter_body):
     paw = body.vertex_groups.new(name="PawFur")
     for v in body.data.vertices:
         on_paw = smoothstep(0.036, 0.028, min((v.co - p).length for p in paws))
-        bare.add([v.index], smoothstep(0.0045, 0.0065, tree.find(v.co)[2]) * (1.0 - on_paw), 'REPLACE')
+        # No fur under the cloth, which the folds lift up to 8 mm off the skin, nor right by it.
+        covered = cloth.ray_cast(v.co, v.normal, 0.015)[0] is not None
+        near = smoothstep(0.0045, 0.0065, cloth.find_nearest(v.co)[3])
+        bare.add([v.index], (0.0 if covered else near) * (1.0 - on_paw), 'REPLACE')
         paw.add([v.index], on_paw, 'REPLACE')
     skin(body, cat_rig)
     add_fur(body, mats, 5000, 0.011, (-1.0, 0.0, -0.6), density_group=bare.name)
@@ -3300,7 +3320,7 @@ def build_cat(mats, coll, scooter_body):
     settings.clump_factor = 0.45
     settings.clump_shape = 0.3
     groom = body_groom()
-    comb_fur(body, groom, lift=(0.9, 0.35))
+    comb_fur(body, groom, lift=(0.9, 0.35), obstacle=cloth)
     # A few longer guard hairs stand out of the coat.
     add_fur(body, mats, 500, 0.018, (-1.0, 0.0, -0.6), density_group=bare.name)
     settings = body.particle_systems[-1].settings
@@ -3308,7 +3328,8 @@ def build_cat(mats, coll, scooter_body):
     settings.radius_scale = 0.0004
     settings.roughness_1 = 0.003
     settings.roughness_endpoint = 0.004
-    comb_fur(body, lambda root, normal: (groom(root, normal)[0], 1.7 * groom(root, normal)[1]), lift=(0.8, 0.35))
+    comb_fur(body, lambda root, normal: (groom(root, normal)[0], 1.7 * groom(root, normal)[1]), lift=(0.8, 0.35),
+             obstacle=cloth)
     add_fur(body, mats, 1500, BODY_FUR["paw"], (-1.0, 0.0, -0.6), density_group=paw.name)
     settings = body.particle_systems[-1].settings
     settings.radius_scale = 0.0003  # roughness and thickness to scale with the short strands
