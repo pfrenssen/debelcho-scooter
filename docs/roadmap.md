@@ -28,7 +28,10 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
 - **Branch motion.** Grass clumps and firs lean as rigid wholes with the gusts. Bending
   trunks and fluttering branches need per-vertex deformation; doing that as shader displacement
   made the Radeon 680M time out and reset during animation renders.
-- **Wheel interaction.** The scooter pushes the verge grass aside and raises a faint dust trail.
+- **Wheel interaction** (only if the line is moved onto the verge). The scooter rides on
+  asphalt about 0.9 m from the nearest grass (`LANE_OFFSET`), so nothing in the shot causes
+  pushed grass or dust. If a stretch of the line runs onto the verge, the clumps near the wheels
+  bend away and the dirt raises a faint dust trail.
 - **Road detail.** A gravel shoulder, a slight crown, and cracks in the geometry (the cracks
   now come only from the asphalt texture).
 - **Terrain erosion.** Run a hydraulic erosion pass on the near height grid for gullies, ridges
