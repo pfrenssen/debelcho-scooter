@@ -33,6 +33,28 @@ blender -b build/cat_scooter.blend --python scripts/render_cycles.py -o //render
 ffmpeg -framerate 24 -i build/render/cycles_%04d.png -c:v libx264 -pix_fmt yuv420p -crf 18 cycles.mp4
 ```
 
+### Resuming an interrupted render
+
+An interrupted MP4 render cannot be resumed, and the partial file does not play. For a long
+render, write a PNG sequence with overwriting turned off. Running the same command again skips
+every frame that already exists ("Skipping existing frame" in the log) and renders the rest:
+
+```bash
+blender -b build/cat_scooter.blend \
+    --python-expr "import bpy; bpy.context.scene.render.use_overwrite = False" \
+    -o //render/frames_#### -F PNG -a
+```
+
+The same `--python-expr` works with the Cycles and resolution scripts. Put it before `-o`,
+because Blender processes its arguments in order. If Blender was killed while it was writing a
+file, the newest PNG can be truncated, so delete it before you resume:
+
+```bash
+rm "$(ls -t build/render/frames_*.png | head -1)"
+```
+
+When every frame is done, encode the sequence with the `ffmpeg` command above.
+
 Planned improvements are in [docs/roadmap.md](docs/roadmap.md).
 
 ## Licence
