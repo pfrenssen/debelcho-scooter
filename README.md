@@ -57,6 +57,14 @@ When every frame is done, encode the sequence with the `ffmpeg` command above.
 
 Planned improvements are in [docs/roadmap.md](docs/roadmap.md).
 
+### Setting the number of samples
+
+For a quick test render, reduce the resolution and the number of samples.
+
+```bash
+blender -b build/cat_scooter.blend --python scripts/render_cycles.py -o //render/cycles_#### -F PNG --python scripts/render_resolution.py --python-expr "import bpy; bpy.context.scene.render.use_overwrite = False; bpy.data.scenes['Scene'].cycles.samples = 8" -a -- 1280 720
+```
+
 ## Licence
 
 GPL-3.0-or-later, see [LICENSE](LICENSE).
