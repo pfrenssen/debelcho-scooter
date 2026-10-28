@@ -12,8 +12,10 @@ on a close-up still in Cycles as well as EEVEE, since the fur strands shade diff
   sets behind the hill). From frame 85 to 165 the cat climbs a stretch steeper than the 4° sun,
   so the road ahead shades it. Easing that grade, or a light linked to the cat for those frames,
   would keep it in the sun.
-- **Body fur grooming.** Vary the length by region (shorter on the paws, longer on the chest
-  and tail), add clumping and some flyaway strands.
+- **Body volume.** The sleek, close-lying coat no longer bulks the body out, so the cat reads
+  leaner than the stocky cat in the photo, most of all in the arms. Widen the limb and torso
+  ellipsoids by about 5–8 mm; check the kerchief fit, the paws on the grips and the handlebar
+  clearance. Best done together with the toes.
 - **Toes on the grips.** The front toes merge into one shape on the handlebar grip; separate
   them so each toe wraps the grip.
 - **Notice the camera.** Around frame 260 the cat should briefly glance towards the camera on

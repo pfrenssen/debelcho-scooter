@@ -3170,6 +3170,36 @@ def build_kerchief(mats, coll, cat_rig, body, neck_base, neck_top):
     return [v.co.copy() for v in mesh.vertices]
 
 
+BODY_FUR = {"pelvis": 0.014, "spine": 0.014, "neck": 0.012, "thigh": 0.013, "shin": 0.009, "foot": 0.005,
+            "upperarm": 0.014, "forearm": 0.012, "paw": 0.005}  # fur length by bone
+CHEST_FUR = 0.019
+
+
+def body_groom():
+    """Short sleek fur, after the photo: down and back over the body, along the legs towards
+    the paws, and shortest on the paws. The direction and length blend between the bones with
+    the weights of skin; the fur is longer on the chest and belly, where the body faces forward."""
+    bones = []
+    for name, (head, tail, _, _) in cat_bones().items():
+        kind = name.split(".")[0]
+        flow = (tail - head).normalized() if "." in name else Vector((-1.0, 0.0, -0.6)).normalized()
+        bones.append((head - CAT_PIVOT, tail - head, flow, BODY_FUR[kind], kind in ("spine", "neck")))
+
+    def groom(root, normal):
+        total, direction, length, torso = 0.0, Vector(), 0.0, 0.0
+        for head, axis, flow, fur, chest in bones:
+            t = min(max((root - head).dot(axis) / axis.length_squared, 0.0), 1.0)
+            weight = 1.0 / ((root - head - axis * t).length + 0.004) ** 4
+            total += weight
+            direction += flow * weight
+            length += fur * weight
+            torso += weight * chest
+        front = smoothstep(0.1, 0.6, normal.x) * torso / total
+        return direction, lerp(length / total, CHEST_FUR, front)
+
+    return groom
+
+
 def build_cat(mats, coll, scooter_body):
     cat_rig = build_cat_armature(coll, scooter_body)
     FUR = 0
@@ -3196,7 +3226,20 @@ def build_cat(mats, coll, scooter_body):
     for v in body.data.vertices:
         bare.add([v.index], smoothstep(0.0045, 0.0065, tree.find(v.co)[2]), 'REPLACE')
     skin(body, cat_rig)
-    add_fur(body, mats, 5000, 0.012, (-1.0, 0.0, -0.6), density_group=bare.name)
+    add_fur(body, mats, 5000, 0.011, (-1.0, 0.0, -0.6), density_group=bare.name)
+    settings = body.particle_systems[-1].settings
+    settings.clump_factor = 0.45
+    settings.clump_shape = 0.3
+    groom = body_groom()
+    comb_fur(body, groom, lift=(0.9, 0.35))
+    # A few longer guard hairs stand out of the coat.
+    add_fur(body, mats, 500, 0.018, (-1.0, 0.0, -0.6), density_group=bare.name)
+    settings = body.particle_systems[-1].settings
+    settings.child_type = 'NONE'
+    settings.radius_scale = 0.0004
+    settings.roughness_1 = 0.003
+    settings.roughness_endpoint = 0.004
+    comb_fur(body, lambda root, normal: (groom(root, normal)[0], 1.7 * groom(root, normal)[1]), lift=(0.8, 0.35))
 
     tail_curve = build_tail(mats, coll, cat_rig)
     head_rig, ears, eyes, whiskers = build_head(mats, coll, cat_rig)
@@ -3251,7 +3294,8 @@ def build_tail(mats, coll, cat_rig):
     bend = tail.modifiers.new("Bend", 'CURVE')
     bend.object = curve
     bend.deform_axis = 'POS_X'
-    add_fur(tail, mats, 900, 0.0144, (0.8, 0.0, 0.0))
+    add_fur(tail, mats, 900, 0.0075, (2.5, 0.0, 0.0))  # 20 mm, lying along the tail at 22° to the skin
+    tail.particle_systems[-1].settings.clump_factor = 0.45
     parent_to_bone(curve, cat_rig, "pelvis")
     parent_to_bone(tail, cat_rig, "pelvis")
     return curve

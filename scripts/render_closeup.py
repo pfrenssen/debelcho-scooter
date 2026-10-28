@@ -27,6 +27,11 @@ VIEWS = {
     "eyes": (0.5, 0.18, 0.63, 0.15, 0.605),  # both eyes, from the side the cat looks to at frame 300
     "ears-q": (0.4, 0.12, 0.72, 0.11, 0.69),  # into the cups
     "ears-back": (-0.05, 0.3, 0.74, 0.11, 0.69),
+    "body-side": (0.0, 1.6, 0.42, 0.0, 0.4),  # whole cat from the left
+    "flank": (0.0, 0.45, 0.42, -0.02, 0.38),  # fur texture on the left side
+    "chest":(0.55, 0.2, 0.62, 0.1, 0.5),
+    "paws": (0.42, 0.42, 0.62, 0.22, 0.53),  # left front paw on the grip
+    "tail": (-0.6, 0.4, 0.5, -0.2, 0.4),
 }
 
 args = sys.argv[sys.argv.index("--") + 1:]
